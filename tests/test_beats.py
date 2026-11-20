@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""节拍分析与卡点：python3 tests/test_beats.py（需要 reel venv：~/.local/share/reel/venv）。
-合成已知节拍的音轨，断言拍点/强拍精度、吸附逻辑、成片切点落拍（逐帧检测颜色突变）。"""
+"""Beat analysis and cut snapping: python3 tests/test_beats.py (needs the reel venv: ~/.local/share/reel/venv).
+Synthesises an audio track with known beats and asserts beat / downbeat accuracy, the snapping logic, and that cuts in the final video land on beats (colour jumps detected frame by frame)."""
 import json, os, shutil, subprocess, sys, tempfile, traceback, wave
 import numpy as np
 
@@ -28,7 +28,7 @@ def case(fn):
 
 
 def synth(path, bpm=120, start=0.3, dur=24.0, sr=44100):
-    """4/4 节奏：强拍底鼓更响、点击音更高，反拍轻踩镲。返回真实拍点/强拍。"""
+    """4/4 rhythm: the downbeat kick is louder and the click higher, with a soft hi-hat on the off-beat. Returns the true beats / downbeats."""
     t = np.arange(int(sr * dur)) / sr
     y = np.zeros_like(t)
     ib = 60 / bpm
@@ -62,23 +62,23 @@ def errs(det, ref, lo=1.0, hi=22.0):
 def librosa_beats_and_downbeats_accurate():
     r = B.analyze(WAV, "librosa")
     e = errs(r["beats"], TRUE_BEATS)
-    assert np.median(e) < 0.012 and e.max() < 0.02, (np.median(e), e.max())          # 修正前系统性晚约 30ms
+    assert np.median(e) < 0.012 and e.max() < 0.02, (np.median(e), e.max())          # before the correction it was systematically about 30ms late
     d = errs(r["downbeats"], TRUE_DOWNS)
-    assert (d < 0.02).all(), d                                                         # 强拍相位推断正确
+    assert (d < 0.02).all(), d                                                         # downbeat phase inferred correctly
     assert abs(r["bpm"] - 120) < 1.5, r["bpm"]
 
 
 @case
 def auto_backend_falls_back_on_crowded_beats():
-    """稀疏鼓点+反拍踩镲的合成节奏上，beat_this 会把反拍也当拍（拍点过密）。
-    auto 必须识别并改用起音校正后的 librosa，结果仍准确；显式 beat_this 必须明确报错而不是给错网格。"""
+    """On a synthetic rhythm of sparse kicks plus off-beat hi-hats, beat_this treats the off-beats as beats too (beats too dense).
+    auto must detect this and switch to onset-corrected librosa, with the result still accurate; an explicit beat_this must raise a clear error instead of giving a wrong grid."""
     if not os.path.exists(os.path.expanduser("~/.cache/torch/hub/checkpoints/beat_this-final0.ckpt")):
         raise Skip("beat_this checkpoint not cached (./install.sh --beats-ml, then run reel beats once)")
     r = B.analyze(WAV, "auto")
-    assert r["backend"] == "librosa" and "过密" in r.get("fallback_reason", ""), (r["backend"], r.get("fallback_reason"))
+    assert r["backend"] == "librosa" and "too dense" in r.get("fallback_reason", ""), (r["backend"], r.get("fallback_reason"))
     assert (errs(r["beats"], TRUE_BEATS) < 0.02).all() and (errs(r["downbeats"], TRUE_DOWNS) < 0.02).all()
     try:
-        B.analyze(WAV, "beat_this"); raise AssertionError("显式 beat_this 应报 BEATS_FAILED")
+        B.analyze(WAV, "beat_this"); raise AssertionError("explicit beat_this should raise BEATS_FAILED")
     except B.ReelError as e:
         assert e.code == "BEATS_FAILED", e.code
 
@@ -89,14 +89,14 @@ def snap_moves_cuts_to_downbeats_with_fallback():
     new, rep = B.snap_boundaries([3.4, 5.0, 7.6], B.grid(info, "downbeat"), tolerance=1.0, min_gap=0.35,
                                  fallback=info["beats"])
     assert abs(new[0] - 4.3) < 1e-9 and abs(new[2] - 8.3) < 1e-9, new
-    assert abs(new[1] - 4.8) < 1e-9 and rep[1]["level"] == "fallback", rep[1]         # 强拍被占用 → 退到普通拍
+    assert abs(new[1] - 4.8) < 1e-9 and rep[1]["level"] == "fallback", rep[1]         # the downbeat is taken, so fall back to an ordinary beat
     new2, rep2 = B.snap_boundaries([3.4, 5.0], B.grid(info, "downbeat"), tolerance=1.0, min_gap=0.35)
-    assert rep2[1].get("unsnapped"), rep2                                               # 无回退时如实报告未吸附
+    assert rep2[1].get("unsnapped"), rep2                                               # without a fallback, report honestly that it was not snapped
 
 
 @case
 def snap_accepts_plans_with_observation_camera():
-    """zoom_to 引用 observations.json 的 plan 也要能卡点（曾因 snap 编译时没带 observations 报 PLAN_INVALID）。"""
+    """A plan whose zoom_to references observations.json must also be snappable (it used to raise PLAN_INVALID because snap compiled without the observations)."""
     from PIL import Image
     d = os.path.join(TMP, "obs"); os.makedirs(d)
     for i in range(3):
@@ -121,8 +121,8 @@ def snap_accepts_plans_with_observation_camera():
 
 @case
 def snap_keeps_shots_valid():
-    """推镜到 t1=3.0 的镜头不能被卡点缩到 3.0 以下：强拍 2.3 被挡掉，退到普通拍 3.3；
-    全被挡掉时保持原位并报告 reason=constraint；require_match 时总长不变（否则 DURATION_MISMATCH）。"""
+    """A shot with a push-in to t1=3.0 must not be snapped below 3.0: the downbeat 2.3 is blocked and it falls back to the ordinary beat 3.3;
+    when everything is blocked it stays in place and reports reason=constraint; with require_match the total length is unchanged (otherwise DURATION_MISMATCH)."""
     from PIL import Image
     from reelcore import render
     d = os.path.join(TMP, "cons"); os.makedirs(d)
@@ -153,7 +153,7 @@ def grid_modes():
     assert B.grid(info, "every:2") == [0.5, 1.5, 2.5]
     assert B.grid(info, "half")[:3] == [0.5, 0.75, 1.0]
     try:
-        B.grid(info, "bogus"); raise AssertionError("未知模式应报错")
+        B.grid(info, "bogus"); raise AssertionError("an unknown mode should raise an error")
     except B.ReelError:
         pass
 
@@ -186,8 +186,8 @@ def rendered_cuts_land_on_beats():
     cuts = [i / 30 for i in range(1, len(fr)) if np.abs(fr[i] - fr[i - 1]).sum() > 60]
     assert len(cuts) == 4, cuts
     for c in cuts:
-        assert min(abs(c - b) for b in TRUE_BEATS) <= 1 / 30 + 1e-6, (c, cuts)          # 每个真实切点离真实拍 ≤1 帧
-    # 时间线节拍轨：卡点后全部标为在拍上；把一个切点挪开 0.2s 后必须被标为不在拍上
+        assert min(abs(c - b) for b in TRUE_BEATS) <= 1 / 30 + 1e-6, (c, cuts)          # every true cut is within 1 frame of a true beat
+    # timeline beat track: after snapping all cuts are marked on the beat; after moving one cut 0.2s away it must be marked off the beat
     png = os.path.join(d, "tl.png")
     r = json.loads(subprocess.run(cli + ["timeline", pj, "--png", png, "--beats", bj], capture_output=True, text=True).stdout)
     beat = [t for t in json.load(open(r["result"]["sidecar"]))["tracks"] if t["track"] == "BEAT"][0]
@@ -204,6 +204,6 @@ if __name__ == "__main__":
         print(("✅ " if ok else "❌ ") + name + ("" if ok else "\n   " + msg.replace("\n", "\n   ")))
     for name, why in SKIPPED:
         print(f"⏭️  {name} — SKIPPED: {why}")
-    print(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过" + (f"，{len(SKIPPED)} 项跳过（缺可选依赖）" if SKIPPED else ""))
+    print(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} passed" + (f", {len(SKIPPED)} skipped (optional dependency missing)" if SKIPPED else ""))
     shutil.rmtree(TMP, ignore_errors=True)
     sys.exit(1 if fails else 0)

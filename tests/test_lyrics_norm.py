@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""歌词比对的多语言回归：python3 tests/test_lyrics_norm.py"""
+"""Multilingual regression of lyrics comparison: python3 tests/test_lyrics_norm.py"""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from reelcore.lyrics import norm

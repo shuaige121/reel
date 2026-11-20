@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""交付闸门故障注入矩阵（无需 pytest）：python3 tests/test_gate.py [--log FILE]
+"""Delivery-gate fault-injection matrix (no pytest needed): python3 tests/test_gate.py [--log FILE]
 
-每个闸门都注入故障，证明它会拦；同时跑合格对照，证明不误拦。CLI 用子进程真跑（PATH/假 ffmpeg 才能注入）。
-1 失败语义  2 技术检测  3 文本扫描  4 brief/声音/试听前置  5 deliver 回执
+Every gate gets an injected fault to prove it blocks, plus a passing control run to prove it does not block wrongly. The CLI runs as a real subprocess (so PATH / a fake ffmpeg can be injected).
+1 failure semantics  2 technical checks  3 text scan  4 brief / voice / audition prerequisites  5 deliver receipts
 """
 import json, os, shutil, stat, subprocess, sys, tempfile, traceback
 
@@ -12,7 +12,7 @@ REEL = os.path.join(ROOT, "reel.py")
 TMP = tempfile.mkdtemp(prefix="reel_gate_")
 STATE = os.path.join(TMP, "state")
 REAL_FFMPEG = shutil.which("ffmpeg")
-RESULTS = []          # (组, 名字, ok, 说明)
+RESULTS = []          # (group, name, ok, description)
 
 
 def case(group):
@@ -36,7 +36,7 @@ def reel(*argv, env=None):
     try:
         out = json.loads(p.stdout)
     except ValueError:
-        raise AssertionError(f"stdout 不是 JSON（exit {p.returncode}）：{p.stdout[-300:]} {p.stderr[-500:]}")
+        raise AssertionError(f"stdout is not JSON (exit {p.returncode}): {p.stdout[-300:]} {p.stderr[-500:]}")
     return out, p.returncode
 
 
@@ -45,14 +45,14 @@ def item(out, name):
 
 
 def blocked(out, code, expect_code=None):
-    assert code != 0 and out["ok"] is False, f"应当被拦：exit={code} ok={out.get('ok')}"
+    assert code != 0 and out["ok"] is False, f"should have been blocked: exit={code} ok={out.get('ok')}"
     if expect_code:
         assert out["error"]["code"] == expect_code, out["error"]
     return out
 
 
 def passed(out, code):
-    assert code == 0 and out["ok"] is True, f"应当放行：exit={code} {json.dumps(out.get('error'), ensure_ascii=False)[:600]}" \
+    assert code == 0 and out["ok"] is True, f"should have passed: exit={code} {json.dumps(out.get('error'), ensure_ascii=False)[:600]}" \
         + (f" blockers={out['result']['gate']['blockers']} pending={out['result']['gate']['pending_review']}"
            if out.get("result") and "gate" in out["result"] else "")
     return out
@@ -71,8 +71,8 @@ def write(name, obj):
     return P(name)
 
 
-# ---------- 素材 ----------
-VOL_DEFAULT, VOL_STRICT = 2.44, 1.94        # 440 Hz 正弦 → 约 -14 / -16 LUFS（实测标定）
+# ---------- media ----------
+VOL_DEFAULT, VOL_STRICT = 2.44, 1.94        # 440 Hz sine, about -14 / -16 LUFS (calibrated by measurement)
 
 
 def make(name, dur=8, vol=VOL_DEFAULT, vf=None, af=None, vcodec="libx264", acodec="aac", ar=48000, audio=True,
@@ -96,9 +96,9 @@ CLEAN_TXT = write("clean.txt", "第一句口播。\n第二句口播，内容完�
 OK_TEXT = ["--text", CLEAN_TXT]
 
 
-# ================= 1 失败语义 =================
+# ================= 1 failure semantics =================
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def control_good_clip_passes():
     out, code = reel("check", GOOD, *OK_TEXT)
     passed(out, code)
@@ -109,32 +109,32 @@ def control_good_clip_passes():
     lu = item(out2, "loudness")["measured"]["integrated_lufs"]
     out3, code3 = reel("check", GOOD, *OK_TEXT, "--profile", "vertical-strict")
     blocked(out3, code3, "CHECK_FAILED")
-    return (f"合格对照 default / vertical-strict（{lu} LUFS）exit 0；default 的合格片在 vertical-strict 下因响度 -14 被拦；"
+    return (f"passing control default / vertical-strict ({lu} LUFS) exit 0; a passing default video is blocked under vertical-strict for loudness -14; "
             f"not_covered={out['result']['gate']['not_covered']}")
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def fail_item_blocks():
     bad = make("black_open.mp4", vf="drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='lt(t,1)'")
     out, code = reel("check", bad, *OK_TEXT)
     blocked(out, code, "CHECK_FAILED")
-    return f"开头 1 s 黑 → {out['error']['detail']['blockers']}"
+    return f"first 1 s black -> {out['error']['detail']['blockers']}"
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def missing_dependency_blocks():
     nobin = os.path.join(TMP, "empty-path")
     os.makedirs(nobin, exist_ok=True)
     out, code = reel("check", GOOD, *OK_TEXT, env={"PATH": nobin})
     blocked(out, code, "DEPENDENCY_MISSING")
-    return f"PATH 里没有 ffmpeg → {out['error']['code']} {out['error']['detail']}"
+    return f"no ffmpeg on PATH -> {out['error']['code']} {out['error']['detail']}"
 
 
 SHIM = os.path.join(TMP, "shim")
 os.makedirs(SHIM)
 with open(os.path.join(SHIM, "ffmpeg"), "w") as fh:
     fh.write(f"""#!{sys.executable}
-# 假 ffmpeg：按 REEL_FAULT 注入故障，其余透传给真 ffmpeg
+# fake ffmpeg: injects the fault named by REEL_FAULT and passes everything else to the real ffmpeg
 import os, subprocess, sys
 mode, _, key = os.environ.get("REEL_FAULT", "").partition(":")
 args = sys.argv[1:]
@@ -161,25 +161,25 @@ def shim(fault):
     return {**SHIM_ENV, "REEL_FAULT": fault}
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def shim_passthrough_is_clean():
     out, code = reel("check", GOOD, *OK_TEXT, env=shim(""))
     passed(out, code)
-    return "假 ffmpeg 不注入时照常放行（证明下面的拦截来自注入）"
+    return "the fake ffmpeg passes as normal when nothing is injected (proving the blocks below come from the injection)"
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def process_nonzero_blocks():
     out, code = reel("check", GOOD, *OK_TEXT, env=shim("exit:ebur128"))
     blocked(out, code, "CHECK_FAILED")
     it = item(out, "loudness")
     assert it["status"] == "not_checked" and it["error"]["code"] == "FFMPEG_FAILED", it
-    return "ebur128 进程退出 1 → loudness not_checked(FFMPEG_FAILED) → 阻断"
+    return "the ebur128 process exits 1, so loudness is not_checked(FFMPEG_FAILED) and the gate blocks"
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def unparsable_events_block():
-    # 片中第 3 秒有 6 帧黑：不篡改时 black_frames fail；事件行格式被改时不能退化成「没有黑帧 = pass」
+    # 6 black frames at second 3: black_frames fails when untouched; when the event-line format is altered it must not degrade into "no black frames = pass"
     bad = make("bf_mid.mp4", vf="drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='between(n,90,95)'")
     out1, _ = reel("check", bad, *OK_TEXT, env=shim(""))
     assert item(out1, "black_frames")["status"] == "fail", item(out1, "black_frames")
@@ -191,10 +191,10 @@ def unparsable_events_block():
     out3, code3 = reel("check", fz, *OK_TEXT, env=shim("mangle:freezedetect"))
     blocked(out3, code3, "CHECK_FAILED")
     assert item(out3, "long_freeze")["error"]["code"] == "OUTPUT_UNPARSABLE", item(out3, "long_freeze")
-    return "有黑帧/定格的片，事件行格式被改 → OUTPUT_UNPARSABLE 阻断，不会当成「没有事件」"
+    return "for a video with black frames / freezes whose event-line format is altered, OUTPUT_UNPARSABLE blocks and it is not treated as \"no events\""
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def unparsable_summary_and_truncated_run_block():
     out, code = reel("check", GOOD, *OK_TEXT, env=shim("nosummary:ebur128"))
     blocked(out, code, "CHECK_FAILED")
@@ -205,10 +205,10 @@ def unparsable_summary_and_truncated_run_block():
     out, code = reel("check", GOOD, *OK_TEXT, env=shim("notp:ebur128"))
     blocked(out, code, "CHECK_FAILED")
     assert item(out, "loudness")["error"]["code"] == "OUTPUT_UNPARSABLE", item(out, "loudness")
-    return "ebur128 无 Summary、Summary 缺 True peak、freezedetect 没跑到片尾 → 都阻断"
+    return "ebur128 without Summary, Summary lacking True peak, and freezedetect not reaching the end all block"
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def required_check_missing_blocks():
     prof = write("prof_need_subs.json", {"extends": "default", "required": ["decode_clean", "subtitles_in_range"]})
     out, code = reel("check", GOOD, *OK_TEXT, "--profile", prof)
@@ -217,20 +217,20 @@ def required_check_missing_blocks():
     out2, code2 = reel("check", GOOD, *OK_TEXT, "--profile", prof2)
     blocked(out2, code2, "CHECK_FAILED")
     whys = [b["why"] for b in out2["result"]["gate"]["blockers"]]
-    assert any("漏跑" in w for w in whys), whys
+    assert any("did not run" in w for w in whys), whys
     out3, code3 = reel("check", GOOD)
     blocked(out3, code3, "CHECK_FAILED")
     assert out3["result"]["gate"]["blockers"][0]["check"] == "text_scan"
-    return "必查项 not_checked（无 plan 的字幕）/ 没有结果（lip_sync）/ 文本扫描没输入 → 都阻断"
+    return "a required check being not_checked (subtitles without a plan) / having no result (lip_sync) / a text scan with no input all block"
 
 
 def needs_review_clip():
-    return make("quiet.mp4", vol=0.6)       # 约 -26 LUFS：只触发 loudness needs_review
+    return make("quiet.mp4", vol=0.6)       # about -26 LUFS: only triggers loudness needs_review
 
 
-def rec(video_sha, check, decision="accept", by="user", note="看过，整体偏轻但可接受", **kw):
+def rec(video_sha, check, decision="accept", by="user", note="watched; overall a bit quiet but acceptable", **kw):
     r = {"video_sha256": video_sha, "check": check, "decision": decision, "by": by, "note": note,
-         "observations": [{"t": [0, 8], "note": "全程偏轻，对白清楚"}]}
+         "observations": [{"t": [0, 8], "note": "quiet throughout, dialogue clear"}]}
     r.update(kw)
     return r
 
@@ -240,7 +240,7 @@ def sha(path):
     return check.sha256(path)
 
 
-@case("1 失败语义")
+@case("1 failure semantics")
 def unhandled_review_blocks_until_recorded():
     q = needs_review_clip()
     out, code = reel("check", q, *OK_TEXT)
@@ -258,47 +258,47 @@ def unhandled_review_blocks_until_recorded():
     out, code = reel("check", q, *OK_TEXT, "--reviews", empty)
     blocked(out, code, "CHECK_NEEDS_REVIEW")
     assert out["result"]["gate"]["invalid_reviews"], out["result"]["gate"]
-    rej = write("rev_rej.json", {"records": [rec(sha(q), "loudness", decision="reject", note="太轻，听不清口播")]})
+    rej = write("rev_rej.json", {"records": [rec(sha(q), "loudness", decision="reject", note="too quiet, the voice-over is hard to hear")]})
     out, code = reel("check", q, *OK_TEXT, "--reviews", rej)
     blocked(out, code, "CHECK_FAILED")
-    return "未处理 REVIEW / 别的文件的记录 / 空记录 → 拦；判定不通过 → FAIL；有效记录 → 放行"
+    return "unresolved REVIEW / a record for another file / an empty record blocks; a failing verdict gives FAIL; a valid record passes"
 
 
-# ================= 2 技术检测 =================
+# ================= 2 technical checks =================
 
-@case("2 技术检测")
+@case("2 technical checks")
 def single_black_first_frame_fails():
     bad = make("bf1.mp4", vf="drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='eq(n,0)'")
     out, code = reel("check", bad, *OK_TEXT)
     blocked(out, code)
     assert item(out, "first_frame")["status"] == "fail", item(out, "first_frame")
-    return "只有第 0 帧黑 → first_frame fail（blackdetect 的最短时长抓不到单帧，first_frame 直接解第 0 帧）"
+    return "only frame 0 black gives first_frame fail (blackdetect's minimum duration cannot catch a single frame, first_frame decodes frame 0 directly)"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def low_motion_tolerates_only_isolated_jitter():
     from reelcore.check import _low_runs
     c = {"diff_max": 0.8, "spike_max": 0.9, "window_s": 4.0}
-    base = [0.4] * 14 + [None] + [0.5] * 3 + [90.0]           # 4.25 s 慢推，第 15 个样本是抖动
+    base = [0.4] * 14 + [None] + [0.5] * 3 + [90.0]           # 4.25 s slow push; the 15th sample is jitter
     seq = lambda *spike: base[:14] + list(spike) + base[14 + len(spike):]
-    assert len(_low_runs(seq(0.82), c, 4)) == 1, "0.82 的孤立抖动（ffmpeg 6.1 实测）不应打断慢推段"
-    assert not _low_runs(seq(0.95), c, 4), "超过 spike_max 的样本必须打断"
-    assert not _low_runs(seq(0.82, 0.82), c, 4), "连续两个超阈值样本必须打断"
-    assert not _low_runs(seq(0.82), {**c, "spike_max": 0.8}, 4), "spike_max=diff_max 时退回原规则"
-    return "孤立 0.82 抖动不打断 4.25 s 慢推段；0.95 或连续两个 0.82 → 打断；spike_max=diff_max 退回原规则"
+    assert len(_low_runs(seq(0.82), c, 4)) == 1, "an isolated jitter of 0.82 (measured on ffmpeg 6.1) must not break the slow-push run"
+    assert not _low_runs(seq(0.95), c, 4), "a sample above spike_max must break the run"
+    assert not _low_runs(seq(0.82, 0.82), c, 4), "two consecutive over-threshold samples must break the run"
+    assert not _low_runs(seq(0.82), {**c, "spike_max": 0.8}, 4), "with spike_max=diff_max it falls back to the original rule"
+    return "an isolated 0.82 jitter does not break a 4.25 s slow-push run; 0.95 or two consecutive 0.82 break it; spike_max=diff_max falls back to the original rule"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def head_silence_fails():
     bad = make("head4.mp4", af="volume=enable='lt(t,4)':volume=0")
     out, code = reel("check", bad, *OK_TEXT)
     blocked(out, code)
     it = item(out, "head_silence")
     assert it["status"] == "fail" and it["measured"]["head_silence_s"] >= 3.9, it
-    return f"开头 4 s 无声 → head_silence fail（{it['measured']}）"
+    return f"first 4 s silent gives head_silence fail（{it['measured']}）"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def tail_silence_fails_by_profile():
     bad = make("tail3.mp4", af="volume=enable='gte(t,5)':volume=0")
     out, code = reel("check", bad, *OK_TEXT)
@@ -308,20 +308,20 @@ def tail_silence_fails_by_profile():
     out2, code2 = reel("check", rb, *OK_TEXT, "--profile", "vertical-strict")
     blocked(out2, code2)
     assert item(out2, "tail_silence")["status"] == "needs_review", item(out2, "tail_silence")
-    return "片尾 3 s 无声 → default fail / vertical-strict needs_review"
+    return "last 3 s silent gives default fail / vertical-strict needs_review"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def long_freeze_fails():
     bad = make("freeze6.mp4", dur=10, vf="loop=loop=179:size=1:start=30")
     out, code = reel("check", bad, *OK_TEXT)
     blocked(out, code, "CHECK_FAILED")
     it = item(out, "long_freeze")
     assert it["status"] == "fail", it
-    return f"定格 6 s → long_freeze fail {it['evidence']}"
+    return f"6 s freeze gives long_freeze fail {it['evidence']}"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def wrong_codec_and_samplerate_fail():
     hv = make("mpeg4.mp4", vcodec="mpeg4", extra=["-q:v", "3"])
     out, code = reel("check", hv, *OK_TEXT)
@@ -336,10 +336,10 @@ def wrong_codec_and_samplerate_fail():
     out3, code3 = reel("check", rb, *OK_TEXT, "--profile", "vertical-strict")
     blocked(out3, code3)
     assert item(out3, "format")["status"] == "fail"
-    return "mpeg4 视频 / 44.1k 采样 / vertical-strict 下 720×1280 → format fail"
+    return "mpeg4 video / 44.1k sample rate / 720x1280 under vertical-strict gives format fail"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def corrupted_video_blocks():
     src = open(GOOD, "rb").read()
     mid = bytearray(src)
@@ -354,11 +354,11 @@ def corrupted_video_blocks():
     open(trunc, "wb").write(src[: n // 2])
     out2, code2 = reel("check", trunc, *OK_TEXT)
     blocked(out2, code2)
-    return (f"中段字节损坏 → {out['error']['code']} decode_clean={item(out, 'decode_clean')['status']}；"
-            f"截断一半 → {out2['error']['code']}")
+    return (f"corrupted bytes in the middle -> {out['error']['code']} decode_clean={item(out, 'decode_clean')['status']}；"
+            f"truncated by half -> {out2['error']['code']}")
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def legal_silent_version_passes():
     prof = write("prof_silent.json", {"extends": "default", "audio": "silent"})
     noaud = make("silent_noaudio.mp4", audio=False)
@@ -371,35 +371,35 @@ def legal_silent_version_passes():
     out2, code2 = reel("check", loud, *OK_TEXT, "--profile", prof)
     blocked(out2, code2)
     assert item(out2, "loudness")["status"] == "fail"
-    return "静音版 profile：无音轨 / 全静音 → 放行；同一片用 default → 拦；静音版却有声 → 拦"
+    return "silent-version profile: no audio track / all silent passes; the same video under default blocks; a silent-profile video that has sound blocks"
 
 
-@case("2 技术检测")
+@case("2 technical checks")
 def registered_exception_passes():
     bad = make("freeze6b.mp4", dur=10, vf="loop=loop=179:size=1:start=30")
     prof = write("prof_allow.json", {"extends": "default", "allow": [
-        {"check": c, "t": [0.9, 7.1], "reason": "片头定格是设计好的标题停留"} for c in ("long_freeze", "freeze", "low_motion")]})
+        {"check": c, "t": [0.9, 7.1], "reason": "the opening freeze is a designed title hold"} for c in ("long_freeze", "freeze", "low_motion")]})
     out, code = reel("check", bad, *OK_TEXT, "--profile", prof)
     passed(out, code)
     assert item(out, "long_freeze")["excused"]["from"] == "fail"
     short = write("prof_allow_short.json", {"extends": "default", "allow": [
-        {"check": c, "t": [0.9, 4.0], "reason": "只登记了前半段"} for c in ("long_freeze", "freeze", "low_motion")]})
+        {"check": c, "t": [0.9, 4.0], "reason": "only the first half was registered"} for c in ("long_freeze", "freeze", "low_motion")]})
     out2, code2 = reel("check", bad, *OK_TEXT, "--profile", short)
     blocked(out2, code2)
     noreason = write("prof_allow_noreason.json", {"extends": "default", "allow": [
         {"check": "long_freeze", "t": [0, 10], "reason": ""}]})
     out3, code3 = reel("check", bad, *OK_TEXT, "--profile", noreason)
     blocked(out3, code3, "PROFILE_INVALID")
-    return "登记例外覆盖整段 → 放行；只覆盖一半 → 拦；例外没写理由 → PROFILE_INVALID"
+    return "an exception covering the whole range passes; covering only half blocks; an exception without a reason gives PROFILE_INVALID"
 
 
-# ================= 3 文本扫描 =================
+# ================= 3 text scan =================
 PROJ = os.path.join(TMP, "proj")
 os.makedirs(PROJ)
 
 
 def render_plan(subs_text):
-    """真渲一个小 plan（运动视频两镜 + 正弦配音 + 字幕），返回 (plan 路径, 成片)。"""
+    """Really render a small plan (two moving-video shots + sine voice-over + subtitles) and return (plan path, final video)."""
     from reelcore import render
     src = os.path.join(PROJ, "src")
     os.makedirs(src, exist_ok=True)
@@ -433,29 +433,29 @@ def scan_hits(out):
     return [(e.get("kind"), e.get("word"), bool(e.get("missing"))) for e in item(out, "text_scan")["evidence"]]
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def control_plan_with_clean_subtitles_passes():
     pp, cut = render_plan(VTT_OK)
     out, code = reel("check", cut, "--plan", pp)
     passed(out, code)
     ts = item(out, "text_scan")
     assert "subtitles" in ts["measured"]["kinds"] and "plan" in ts["measured"]["kinds"], ts
-    return f"真渲的 plan + 干净字幕 → 放行；扫描了 {ts['measured']['kinds']}"
+    return f"a really rendered plan + clean subtitles passes; scanned {ts['measured']['kinds']}"
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def banned_in_plan_subtitles_blocks():
     pp, cut = render_plan(VTT_BAD)
     out, code = reel("check", cut, "--plan", pp)
     blocked(out, code, "CHECK_FAILED")
     assert ("subtitles", "待定", False) in scan_hits(out), scan_hits(out)
     render_plan(VTT_OK)
-    return "plan 字幕里有「待定」→ 阻断"
+    return "the word 待定 (TBD) in the plan subtitles blocks"
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def banned_in_extra_subs_text_and_brief_block():
-    srt = write("extra.srt", "1\n00:00:00,000 --> 00:00:02,000\nTODO 换成正式文案\n")
+    srt = write("extra.srt", "1\n00:00:00,000 --> 00:00:02,000\nTODO replace with final copy\n")
     out, code = reel("check", GOOD, *OK_TEXT, "--subs", srt)
     blocked(out, code, "CHECK_FAILED")
     assert ("subtitles", "TODO", False) in scan_hits(out), scan_hits(out)
@@ -467,10 +467,10 @@ def banned_in_extra_subs_text_and_brief_block():
     out, code = reel("check", GOOD, *OK_TEXT, "--brief", br)
     blocked(out, code, "CHECK_FAILED")
     assert ("brief", "待确认", False) in scan_hits(out), scan_hits(out)
-    return "--subs 里 TODO / --text 里 lorem ipsum / brief 里「待确认」→ 各自阻断"
+    return "TODO in --subs / lorem ipsum in --text / the word 待确认 (to be confirmed) in the brief each block"
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def banned_in_plan_visible_text_is_found():
     from reelcore import profiles, textscan
     plan = {"shots": [{"id": "w1", "kind": "web", "web": {"url": "a.html"},
@@ -482,10 +482,10 @@ def banned_in_plan_visible_text_is_found():
     plan["shots"][0]["highlight"][0]["text"] = "报名费 300 元"
     r = textscan.scan(textscan.collect(plan=plan), profiles.load())
     assert r["status"] == "pass", r
-    return "plan 网页镜头的 highlight 文字里有 TBD → fail；改掉 → pass（模块层，网页镜头不在这里真渲）"
+    return "TBD in the highlight text of a plan web shot fails; fixing it passes (module level; the web shot is not really rendered here)"
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def missing_required_text_blocks():
     out, code = reel("check", GOOD, *OK_TEXT, "--text", P("no_such_caption.txt"))
     blocked(out, code, "CHECK_FAILED")
@@ -503,10 +503,10 @@ def missing_required_text_blocks():
     out, code = reel("check", cut, "--plan", pp)
     blocked(out, code)
     render_plan(VTT_OK)
-    return (f"指定的文本/字幕/brief 文件不存在、profile 要求字幕却没有、plan 的字幕被删（{out['error']['code']}）→ 都阻断")
+    return (f"a specified text / subtitle / brief file is missing, the profile requires subtitles but there are none, or the plan's subtitles were removed ({out['error']['code']}) all block")
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def allowed_phrase_passes_old_name_blocks():
     prof = write("prof_oldname.json", {"extends": "default",
                                        "text": {"extra_banned": ["Acme Edu"], "allow": ["Acme Education"]}})
@@ -517,24 +517,24 @@ def allowed_phrase_passes_old_name_blocks():
     blocked(out, code, "CHECK_FAILED")
     both = write("name_both.txt", "Acme Education 与 Acme Edu\n")
     blocked(*reel("check", GOOD, "--text", both, "--profile", prof))
-    return "旧名 Acme Edu 禁用、Acme Education 放行；同一行两者都有 → 仍拦"
+    return "the old name Acme Edu is banned and Acme Education passes; both on the same line still blocks"
 
 
-@case("3 文本扫描")
+@case("3 text scan")
 def ocr_is_reported_not_covered():
     out, code = reel("check", GOOD, *OK_TEXT)
     passed(out, code)
     o = item(out, "ocr_visible_text")
     assert o["status"] == "not_checked" and "OCR" in o["rule"], o
     assert "ocr_visible_text" in out["result"]["gate"]["not_covered"]
-    assert "只覆盖输入文本" in item(out, "text_scan")["rule"]
-    return "画面文字没有 OCR：ocr_visible_text 固定 not_checked，列在 gate.not_covered"
+    assert "only input text is covered" in item(out, "text_scan")["rule"]
+    return "text in the picture is not OCR-ed: ocr_visible_text is always not_checked and listed in gate.not_covered"
 
 
-# ================= 4 brief / 声音审样 / 试听前置；5 deliver 回执 =================
+# ================= 4 brief / voice audition / audition prerequisites; 5 deliver receipts =================
 
 def card_push_clip():
-    """4.5 s 字卡 1.00→1.06 慢推 + 3 s 实拍：定格检测抓不到，只有 low_motion 会报。"""
+    """A 4.5 s text card pushed slowly 1.00 to 1.06 + 3 s of live footage: freeze detection misses it and only low_motion reports it."""
     out = P("cardpush.mp4")
     if os.path.isfile(out):
         return out
@@ -549,7 +549,7 @@ def card_push_clip():
 
 
 def project(name, drop=(), **over):
-    """一个登记任务：项目目录 + 交付目录 + 已批准的 TTS 声音 + brief。"""
+    """A registered task: project directory + delivery directory + an approved TTS voice + brief."""
     pdir = os.path.join(TMP, name)
     root = os.path.join(TMP, name + "-交付")
     os.makedirs(pdir, exist_ok=True)
@@ -575,11 +575,11 @@ def project(name, drop=(), **over):
 def final_reviews(video, name, extra=(), watch=None, listen=None):
     s = sha(video)
     dw = {"video_sha256": s, "check": "final_watch", "decision": "accept", "by": "claude",
-          "note": "完整看完一遍，逐段对过分镜",
-          "observations": [{"t": 0, "note": "首帧有画面"}, {"t": [3, 5], "note": "中段正常"}]}
+          "note": "watched in full, checked section by section against the storyboard",
+          "observations": [{"t": 0, "note": "the first frame has a picture"}, {"t": [3, 5], "note": "the middle is normal"}]}
     dl = {"video_sha256": s, "check": "final_listen", "decision": "accept", "by": "user",
-          "note": "从头听完一遍", "quote": "声音没问题，可以发"}
-    recs = [dw if watch is None else watch, dl if listen is None else listen] + list(extra)   # 传 {} = 不要这条
+          "note": "listened from the start", "quote": "声音没问题，可以发"}
+    recs = [dw if watch is None else watch, dl if listen is None else listen] + list(extra)   # pass {} = leave this record out
     return write(name, {"version": "reel.reviews.v1", "records": [r for r in recs if r]})
 
 
@@ -592,7 +592,7 @@ def deliver(video, bp, version, *extra):
     return reel("deliver", video, "--brief", bp, "--version", version, *OK_TEXT, *extra)
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def control_full_final_delivery():
     bp, root, pdir = project("p_ok")
     rv = final_reviews(GOOD, "rv_ok.json")
@@ -600,10 +600,30 @@ def control_full_final_delivery():
     passed(out, code)
     r = out["result"]
     assert r["status"] == "final" and os.path.isfile(os.path.join(root, "测试片-v1.mp4")), r
-    return f"brief 齐全 + 声音已批准 + 看片/试听记录 → 成片 {os.path.basename(r['delivered'])}"
+    return f"complete brief + approved voice + watch / listen records give a final {os.path.basename(r['delivered'])}"
 
 
-@case("4 brief 与试听前置")
+@case("5 deliver receipts")
+def delivered_file_mode_follows_umask():
+    """A delivered file gets the normal mode (0666 minus umask), not the owner-only mode of mkstemp."""
+    modes = {}
+    old = os.umask(0o022)
+    try:
+        for um, ver in ((0o022, "v1"), (0o077, "v2")):
+            os.umask(um)
+            bp, root, pdir = project("p_mode_" + ver)
+            rv = final_reviews(GOOD, "rv_mode_" + ver + ".json")
+            out, code = deliver(GOOD, bp, "v1", "--reviews", rv)
+            passed(out, code)
+            modes[um] = stat.S_IMODE(os.stat(out["result"]["delivered"]).st_mode)
+    finally:
+        os.umask(old)
+    assert modes[0o022] == 0o644, oct(modes[0o022])
+    assert modes[0o077] == 0o600, oct(modes[0o077])
+    return f"delivered file mode is 0644 under umask 022 and 0600 under umask 077 (it follows the umask; it is no longer always 0600)"
+
+
+@case("4 brief and audition prerequisites")
 def missing_brief_fields_only_sample():
     rv = final_reviews(GOOD, "rv_fields.json")
     notes = []
@@ -621,10 +641,10 @@ def missing_brief_fields_only_sample():
     blocked(out, code, "BRIEF_INVALID")
     bp, root, pdir = project("p_broad_root", delivery_root="~")
     blocked(*deliver(GOOD, bp, "v1", "--reviews", rv, "--sample"), "BRIEF_INVALID")
-    return f"缺 {notes} → 拒绝成片、--sample 可交待审样片；缺交付目录或目录太宽（~）→ 样片也不行"
+    return f"lacking {notes} refuses a final while --sample can deliver a sample pending review; a missing delivery directory or one that is too broad (~) refuses even a sample"
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def unapproved_voice_only_sample():
     rv = final_reviews(GOOD, "rv_voice.json")
     bad_voices = {
@@ -649,11 +669,11 @@ def unapproved_voice_only_sample():
         out, code = deliver(GOOD, bp, "v1", "--reviews", rv)
         blocked(out, code, "DELIVERY_NOT_FINAL")
         whys.append(tag)
-    return f"未批准 / 批的是别的声音 / agent 自己批但没有 STT 证据 / 试听样本被换 → 都拒绝成片（{whys}）"
+    return f"not approved / a different voice approved / agent-approved without STT evidence / audition sample replaced all refuse a final ({whys}）"
 
 
 SCRIPT = "今天我们来看一看这座城市的早晨，街口的早餐铺已经开门，豆浆刚刚煮好。"
-try:                       # 中文按拼音比要 pypinyin（./install.sh --zh-voice）；没装时整组改用英文样本，闸门逻辑相同
+try:                       # Chinese is compared by pinyin and needs pypinyin (./install.sh --zh-voice); without it the whole group uses English samples, with the same gate logic
     import pypinyin  # noqa: F401
     STT_LANG, STT_SCRIPT = "zh", SCRIPT
     STT_OK = SCRIPT.replace("，", " ").replace("我们", "我门")
@@ -667,7 +687,7 @@ except ImportError:
     STT_OTHER, STT_SHORT = "a completely different sentence", "Hello"
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def agent_voice_approval_needs_stt():
     rv = final_reviews(GOOD, "rv_vstt.json")
     def with_stt(tag, **stt_over):
@@ -692,11 +712,11 @@ def agent_voice_approval_needs_stt():
     out, code = with_stt("ok")
     passed(out, code)
     assert out["result"]["status"] == "final", out["result"]
-    return (f"[{STT_LANG}] agent 带 STT 证据（转写只差一处近音错字）→ 成片；转写对不上 / 自报 0 但重算不过 / 转写的不是这份样本 / "
-            f"文本太短 / 没写引擎 → 拒绝（{whys}）")
+    return (f"[{STT_LANG}] agent with STT evidence (the transcript differs by one near-homophone error) gives a final; a transcript that does not match / a self-reported 0 that fails recomputation / a transcript of another sample / "
+            f"text too short / no engine named is refused ({whys}）")
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def voice_check_cli_writes_approval():
     bp, root, pdir = project("p_vcli")
     b = json.load(open(bp, encoding="utf-8")); b["voice"].pop("approved")
@@ -708,7 +728,7 @@ def voice_check_cli_writes_approval():
     blocked(out, code, "BACKEND_UNAVAILABLE")
     model = os.environ.get("REEL_WHISPER_MODEL") or os.path.expanduser("~/models/whisper/ggml-large-v3-turbo.bin")
     if not (shutil.which("say") and shutil.which("whisper-cli") and os.path.isfile(model) and STT_LANG == "zh"):
-        return "SKIPPED 真转写（缺 say / whisper-cli / 模型 / pypinyin 之一）：只验了缺模型时报 BACKEND_UNAVAILABLE"
+        return "SKIPPED real transcription (one of say / whisper-cli / model / pypinyin is missing): only verified that a missing model gives BACKEND_UNAVAILABLE"
     aiff = os.path.join(pdir, "say.aiff")
     subprocess.run(["say", "-v", "Tingting", "-o", aiff, SCRIPT], check=True)
     ff("-i", aiff, "-ar", "48000", sp)
@@ -725,10 +745,10 @@ def voice_check_cli_writes_approval():
     out, code = deliver(GOOD, bp, "v1", "--reviews", final_reviews(GOOD, "rv_vcli.json"))
     passed(out, code)
     assert out["result"]["status"] == "final", out["result"]
-    return f"真转写（say 念 → whisper）：对的文本拼音错误率 {err:.0%} → 写入 brief，成片可交；换一段文本 → VOICE_CHECK_FAILED，brief 不写；缺模型 → BACKEND_UNAVAILABLE"
+    return f"real transcription (say speaks, whisper transcribes): pinyin error rate of the correct text {err:.0%} is written to the brief and a final can be delivered; different text gives VOICE_CHECK_FAILED and the brief is not written; a missing model gives BACKEND_UNAVAILABLE"
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def final_listen_agent_needs_observations():
     bp, root, pdir = project("p_listen")
     s = sha(GOOD)
@@ -736,7 +756,7 @@ def final_listen_agent_needs_observations():
     blocked(*deliver(GOOD, bp, "v1", "--reviews", no_listen), "DELIVERY_NOT_FINAL")
     agent_listen_bare = final_reviews(GOOD, "rv_agentlisten.json", listen={
         "video_sha256": s, "check": "final_listen", "decision": "accept", "by": "claude-agent",
-        "note": "响度达标，应该没问题", "quote": "ok"})
+        "note": "loudness is within target, should be fine", "quote": "ok"})
     out, code = deliver(GOOD, bp, "v1", "--reviews", agent_listen_bare)
     blocked(out, code, "DELIVERY_NOT_FINAL")
     no_watch = final_reviews(GOOD, "rv_nowatch.json", watch={})
@@ -744,8 +764,8 @@ def final_listen_agent_needs_observations():
     assert not receipts(pdir)
     agent_listen = final_reviews(GOOD, "rv_agentlisten2.json", listen={
         "video_sha256": s, "check": "final_listen", "decision": "accept", "by": "claude",
-        "note": "从头听完，逐段对过电平和接缝",
-        "observations": [{"t": [0, 2], "note": "开头无爆音"}, {"t": [4, 6], "note": "结尾自然收"}]})
+        "note": "listened from the start, checked levels and seams section by section",
+        "observations": [{"t": [0, 2], "note": "no pop at the start"}, {"t": [4, 6], "note": "the ending closes naturally"}]})
     out, code = deliver(GOOD, bp, "v1", "--reviews", agent_listen)
     passed(out, code)
     assert out["result"]["status"] == "final" and out["result"]["approved_by"] == "agent", out["result"]
@@ -754,10 +774,10 @@ def final_listen_agent_needs_observations():
     out, code = deliver(GOOD, bp2, "v1", "--reviews", final_reviews(GOOD, "rv_humanlisten.json"))
     passed(out, code)
     assert out["result"]["approved_by"] == "human", out["result"]
-    return "没有试听记录 / agent 只写一句没带时间码观察 / 没有完整看片记录 → 拒绝成片；agent 带时间码听完 → 成片，approved_by=agent；人记原话 → approved_by=human"
+    return "no listening record / an agent with one line and no timecoded observation / no full-watch record is refused a final; an agent with timecoded listening gives a final with approved_by=agent; a person's quoted words give approved_by=human"
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def long_card_slow_push_only_sample_until_reviewed():
     cp = card_push_clip()
     bp, root, pdir = project("p_card")
@@ -769,13 +789,13 @@ def long_card_slow_push_only_sample_until_reviewed():
     passed(out, code)
     rv2 = final_reviews(cp, "rv_card2.json", extra=[{
         "video_sha256": sha(cp), "check": "low_motion", "decision": "accept", "by": "user",
-        "note": "片头标题停留是设计好的", "observations": [{"t": [0, 4.25], "note": "标题卡慢推，用户确认保留"}]}])
+        "note": "the title hold at the start is designed", "observations": [{"t": [0, 4.25], "note": "slow push on the title card, the user confirmed keeping it"}]}])
     out, code = deliver(cp, bp, "v2", "--reviews", rv2)
     passed(out, code)
-    return "4.5 s 字卡慢推 → 只能交 v1 待审样片；逐项审片记录处理 low_motion 后 → v2 成片"
+    return "a 4.5 s slow-pushed card can only be delivered as a v1 sample pending review; after a per-item review record handles low_motion, v2 is a final"
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def brief_profile_applies_to_check_and_deliver():
     bp, root, pdir = project("p_prof", profile="proj-profile.json")
     with open(os.path.join(pdir, "proj-profile.json"), "w", encoding="utf-8") as fh:
@@ -786,10 +806,10 @@ def brief_profile_applies_to_check_and_deliver():
     assert out["result"]["profile"]["name"] == "vertical-strict", out["result"]["profile"]
     blocked(*deliver(GOOD, bp, "v1", "--reviews", rv), "DELIVERY_BLOCKED")
     passed(*reel("check", GOOD, *OK_TEXT, "--brief", bp, "--profile", "default"))
-    return "brief.profile（相对 brief 目录的项目 profile → vertical-strict）同时作用于 check 和 deliver；--profile 可覆盖"
+    return "brief.profile (a project profile relative to the brief directory, extending vertical-strict) applies to both check and deliver; --profile can override it"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def receipt_binds_hashes_and_makes_no_viewing_claim():
     bp, root, pdir = project("p_rcpt")
     rv = final_reviews(GOOD, "rv_rcpt.json")
@@ -810,12 +830,12 @@ def receipt_binds_hashes_and_makes_no_viewing_claim():
     with open(r["delivered"], "ab") as fh:
         fh.write(b"tampered")
     blocked(*reel("receipt", r["receipt"]), "RECEIPT_INVALID")
-    return "回执绑定成片/brief/profile/报告/审片记录 hash；复制后 hash 一致；只写「已复制」；交付后被改 → RECEIPT_INVALID"
+    return "the receipt binds the hashes of the video / brief / profile / report / review records; the hash matches after copying; it only says copied; a change after delivery gives RECEIPT_INVALID"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def approved_sample_promotes_to_final_same_file_only():
-    """待审样片被用户认可后，同版本号升成片：只认同一个文件，成片条件一条不少。"""
+    """A sample pending review that the user has approved is promoted to final under the same version: only the same file counts and every final condition still applies."""
     bp, root, pdir = project("p_promote")
     passed(*deliver(GOOD, bp, "v1", "--reviews", final_reviews(GOOD, "rv_pr0.json", listen={}), "--sample"))
     blocked(*deliver(GOOD, bp, "v1", "--reviews", final_reviews(GOOD, "rv_pr1.json", listen={})), "DELIVERY_NOT_FINAL")
@@ -828,24 +848,24 @@ def approved_sample_promotes_to_final_same_file_only():
     assert r["status"] == "final" and r["promoted_from"].endswith("测试片-v1.json") and r["receipt"].endswith("测试片-v1-final.json"), r
     assert sorted(os.listdir(root)) == ["测试片-v1-sample-pending-review.mp4", "测试片-v1.mp4"], os.listdir(root)
     blocked(*deliver(GOOD, bp, "v1", "--reviews", final_reviews(GOOD, "rv_pr4.json")), "VERSION_EXISTS")
-    return "样片→成片：缺试听记录仍拒；换了文件 → PROMOTE_MISMATCH；同一文件+认可 → 成片回执带 promoted_from；不能再升第二次"
+    return "sample to final: still refused without a listening record; a changed file gives PROMOTE_MISMATCH; the same file plus approval gives a final receipt with promoted_from; it cannot be promoted a second time"
 
 
-@case("4 brief 与试听前置")
+@case("4 brief and audition prerequisites")
 def final_reject_overrides_earlier_accept():
     bp, root, pdir = project("p_rej")
     s_ = sha(GOOD)
     rej = {"video_sha256": s_, "check": "final_listen", "decision": "reject", "by": "user",
-           "note": "复听后觉得配音太快", "quote": "这版不行"}
+           "note": "on listening again the voice-over felt too fast", "quote": "this version is not good"}
     rv = final_reviews(GOOD, "rv_rej.json", extra=[rej])
     out, code = deliver(GOOD, bp, "v1", "--reviews", rv)
     blocked(out, code, "DELIVERY_NOT_FINAL")
-    assert any("final_listen 判定不通过" in x for x in out["error"]["detail"]["final_blockers"]), out["error"]["detail"]
+    assert any("final_listen did not pass" in x for x in out["error"]["detail"]["final_blockers"]), out["error"]["detail"]
     passed(*deliver(GOOD, bp, "v1", "--reviews", rv, "--sample"))
-    return "同一成片先 accept 后 reject → 拒绝成片（任何 accept 都不算），只能交待审样片"
+    return "accept then reject on the same video refuses a final (no accept counts) and only a sample pending review can be delivered"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def receipt_binds_plan_and_profile_hashes():
     from reelcore import profiles
     pp, cut = render_plan(VTT_OK)
@@ -856,10 +876,10 @@ def receipt_binds_plan_and_profile_hashes():
     h = out["result"]["hashes"]
     assert h["plan"] == sha(pp), (h["plan"], sha(pp))
     assert h["profile"] == profiles.load("default")["_sha256"], h["profile"]
-    return "带 --plan 交付：回执里 plan hash = plan.json 的 sha256，profile hash = 解析后 default profile 的 sha256"
+    return "delivery with --plan: the receipt's plan hash = the sha256 of plan.json, and the profile hash = the sha256 of the resolved default profile"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def stale_report_cannot_vouch_for_bad_cut():
     bp, root, pdir = project("p_stale")
     old = P("old_pass_report.json")
@@ -873,10 +893,10 @@ def stale_report_cannot_vouch_for_bad_cut():
     assert p.returncode == 2 and "unrecognized arguments: --report" in p.stderr, (p.returncode, p.stderr[-200:])
     blocked(*deliver(bad, bp, "v1", "--reviews", rv, "--sample"), "DELIVERY_BLOCKED")
     assert not receipts(pdir) and not os.listdir(root)
-    return "deliver 每次自己重查，没有 --report 入口；坏片连待审样片也不能交"
+    return "deliver re-checks by itself every time and has no --report entry; a bad video cannot be delivered even as a sample pending review"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def cut_replaced_after_review_is_not_final():
     bp, root, pdir = project("p_swap")
     rv = final_reviews(GOOD, "rv_swap.json")
@@ -885,10 +905,10 @@ def cut_replaced_after_review_is_not_final():
     out, code = deliver(swapped, bp, "v1", "--reviews", rv)
     blocked(out, code, "DELIVERY_NOT_FINAL")
     assert not receipts(pdir)
-    return "审片记录绑定的是原片 hash，换成重编码版本 → 记录作废，拒绝成片"
+    return "review records are bound to the original video's hash; a re-encoded version voids them and a final is refused"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def forged_empty_review_is_rejected():
     bp, root, pdir = project("p_forge")
     s = sha(GOOD)
@@ -896,16 +916,16 @@ def forged_empty_review_is_rejected():
                                                        "by": "claude", "note": "", "observations": []})
     out, code = deliver(GOOD, bp, "v1", "--reviews", rv)
     blocked(out, code, "DELIVERY_NOT_FINAL")
-    assert any("不合格" in x for x in out["error"]["detail"]["final_blockers"]), out["error"]["detail"]
+    assert any("invalid" in x for x in out["error"]["detail"]["final_blockers"]), out["error"]["detail"]
     q = needs_review_clip()
     rv2 = final_reviews(q, "rv_forge2.json", extra=[{"video_sha256": sha(q), "check": "loudness", "decision": "accept",
                                                      "by": "claude", "note": "ok"}])
     blocked(*deliver(q, bp, "v1", "--reviews", rv2), "DELIVERY_NOT_FINAL")
     assert not receipts(pdir)
-    return "空的看片记录、只写「ok」不带时间码的 REVIEW 处理 → 都不算，拒绝成片"
+    return "an empty watch record and a REVIEW handled with only ok and no timecode do not count; a final is refused"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def copy_mismatch_leaves_nothing():
     import contextlib, io
     from reelcore import cli, deliver as D
@@ -929,10 +949,10 @@ def copy_mismatch_leaves_nothing():
     out = json.loads(buf.getvalue())
     blocked(out, code, "COPY_MISMATCH")
     assert not os.listdir(root) and not receipts(pdir), (os.listdir(root), receipts(pdir))
-    return "复制时注入坏字节 → COPY_MISMATCH；交付目录没有残留（含临时文件），没有回执"
+    return "injecting bad bytes while copying gives COPY_MISMATCH; nothing is left in the delivery directory (temp files included) and there is no receipt"
 
 
-@case("5 deliver 回执")
+@case("5 deliver receipts")
 def version_reuse_is_refused():
     bp, root, pdir = project("p_dup")
     rv = final_reviews(GOOD, "rv_dup.json")
@@ -945,7 +965,7 @@ def version_reuse_is_refused():
     assert open(os.path.join(root, "测试片-v2.mp4"), "rb").read() == b"someone else's file"
     blocked(*deliver(GOOD, bp, "final", "--reviews", rv), "ARG_INVALID")
     assert receipts(pdir) == ["测试片-v1.json"], receipts(pdir)
-    return "同版本号再交（成片或样片）/ 交付目录里已有同名文件 → VERSION_EXISTS，不覆盖；版本号必须是 vN"
+    return "delivering the same version again (final or sample) / a same-name file already in the delivery directory gives VERSION_EXISTS without overwriting; the version must be vN"
 
 
 if __name__ == "__main__":
@@ -954,7 +974,7 @@ if __name__ == "__main__":
     for g, name, ok, msg in RESULTS:
         lines.append(f"{'✅' if ok else '❌'} [{g}] {name}" + (f" — {msg}" if ok and msg else ("" if ok else "\n   " + msg.replace("\n", "\n   "))))
     fails = [r for r in RESULTS if not r[2]]
-    lines.append(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过")
+    lines.append(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} passed")
     print("\n".join(lines))
     if log:
         with open(log, "w", encoding="utf-8") as fh:

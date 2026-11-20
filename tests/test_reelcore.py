@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""reelcore 回归测试（无需 pytest）：python3 tests/test_reelcore.py
-覆盖代码审核发现的 A 类问题 + 几何/闸门。需要 ffmpeg；不连远程主机（gpu_gate 用假数据）。"""
+"""reelcore regression tests (no pytest needed): python3 tests/test_reelcore.py
+Covers the class-A issues found in code review plus geometry / gates. Needs ffmpeg; does not connect to a remote host (gpu_gate uses fake data)."""
 import json, math, os, re, shutil, subprocess, sys, tempfile, traceback
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,16 +31,16 @@ def raises(code, f, *a, **k):
     try:
         f(*a, **k)
     except ReelError as e:
-        assert e.code == code, f"期望 {code}，实际 {e.code}: {e.message} {e.detail}"
+        assert e.code == code, f"expected {code}, got {e.code}: {e.message} {e.detail}"
         return e
-    raise AssertionError(f"期望抛出 {code}，但没有抛")
+    raise AssertionError(f"expected {code} to be raised, but nothing was raised")
 
 
 def ff(*args):
     subprocess.run(["ffmpeg", "-y", "-v", "error", *args], check=True)
 
 
-# ---------- 素材 ----------
+# ---------- media ----------
 IMG = os.path.join(TMP, "img.png"); VOICE = os.path.join(TMP, "voice.wav"); VTT = os.path.join(TMP, "v.vtt")
 ff("-f", "lavfi", "-i", "testsrc2=s=1600x1000:d=1", "-frames:v", "1", IMG)
 ff("-f", "lavfi", "-i", "sine=f=300:d=3.0", "-ar", "48000", VOICE)
@@ -58,7 +58,7 @@ def base_plan(**over):
     return p
 
 
-# ---------- A: still 真静止 / 未知运镜 ----------
+# ---------- A: still is truly static / unknown camera move ----------
 @case
 def still_is_static():
     vp, cam = P.legacy_camera("still", 2.0)
@@ -73,7 +73,7 @@ def unknown_move_rejected():
     raises("PLAN_INVALID", P.legacy_camera, "tpyo", 2.0)
 
 
-# ---------- A: 单段 + 转场 / 转场过长 / 最后一镜不能有转场 ----------
+# ---------- A: single segment + transition / transition too long / the last shot cannot have a transition ----------
 @case
 def single_shot_with_xfade_has_no_transition():
     txt = os.path.join(TMP, "one.txt"); open(txt, "w").write("img.png|0|3|in\n")
@@ -86,13 +86,13 @@ def single_shot_with_xfade_has_no_transition():
 def transition_rules():
     p = base_plan(); p["shots"][0]["transition_out"] = {"type": "fade", "duration": 1.0}
     e = raises("PLAN_INVALID", P.validate, p)
-    assert any("超过相邻镜头" in x for x in e.detail["errors"])
+    assert any("adjacent shot" in x for x in e.detail["errors"])
     p = base_plan(); p["shots"][1]["transition_out"] = {"type": "fade", "duration": 0.2}
     e = raises("PLAN_INVALID", P.validate, p)
-    assert any("最后一个镜头" in x for x in e.detail["errors"])
+    assert any("last shot" in x for x in e.detail["errors"])
 
 
-# ---------- A: 转场吃掉配音尾巴 ----------
+# ---------- A: a transition eats the end of the voice-over ----------
 @case
 def transition_duration_mismatch_detected_and_fitted():
     p = base_plan(); p["shots"][0]["transition_out"] = {"type": "fade", "duration": 0.5}
@@ -103,7 +103,7 @@ def transition_duration_mismatch_detected_and_fitted():
     assert c["visual_f"] == c["voice_f"] == 90 and c["frames"][-1] == 60, (c["visual_f"], c["frames"])
 
 
-# ---------- A: 字幕解析 ----------
+# ---------- A: subtitle parsing ----------
 @case
 def subtitles_parse_short_timestamps_and_numeric_text():
     ev = subtitles.parse(VTT)
@@ -138,7 +138,7 @@ def subtitle_time_carry():
     assert ",1000" not in open(srt).read()
 
 
-# ---------- plan 校验 ----------
+# ---------- plan validation ----------
 @case
 def plan_validation_reports_all():
     p = base_plan(); p["shots"][0]["camera"] = [
@@ -147,7 +147,7 @@ def plan_validation_reports_all():
     p["shots"][0]["bogus"] = 1
     e = raises("PLAN_INVALID", P.validate, p)
     errs = " ".join(e.detail["errors"])
-    assert "未知字段 'bogus'" in errs and "bbox 缺失或非法" in errs and "重叠" in errs, errs
+    assert "unknown field 'bogus'" in errs and "bbox is missing or invalid" in errs and "overlaps" in errs, errs
 
 
 @case
@@ -162,7 +162,7 @@ def observation_mismatch_rejected():
     assert p["shots"][0]["camera"][0]["bbox"] == [0.1, 0.1, 0.2, 0.2]
 
 
-# ---------- 几何 ----------
+# ---------- geometry ----------
 @case
 def zoom_target_contains_subject_with_aspect():
     b = (1200, 100, 1400, 300)
@@ -182,7 +182,7 @@ def max_zoom_respected():
 @case
 def subject_too_large():
     raises("SUBJECT_TOO_LARGE", camera.zoom_target, (0, 0, 1600, 300), 0.1, 3, 1600, 1000, 540 / 960)
-    # 竖屏输出要求取整张横图：不能悄悄裁掉，必须报错
+    # a portrait output asks for the whole landscape picture: it must not be cropped silently, it must raise an error
     shot = {"id": "s", "duration": 1, "camera": [{"op": "move_to", "viewport": [0, 0, 1, 1], "t0": 0, "t1": 1,
                                                   "easing": "linear"}]}
     raises("SUBJECT_TOO_LARGE", camera.ShotCamera, shot, META, 540, 960, 30)
@@ -192,7 +192,7 @@ def _eval_ffexpr(expr, on):
     env = {"on": on, "PI": math.pi, "cos": math.cos, "sin": math.sin, "pow": math.pow,
            "clip": lambda x, a, b: min(max(x, a), b), "lt": lambda a, b: 1.0 if a < b else 0.0,
            "iff": lambda c, a, b: a if c else b}
-    return eval(re.sub(r"\bif\(", "iff(", expr), env)  # noqa: S307  测试里求值自己生成的表达式
+    return eval(re.sub(r"\bif\(", "iff(", expr), env)  # noqa: S307  the test evaluates expressions it generated itself
 
 
 @case
@@ -228,7 +228,7 @@ def track_expression_matches_python_and_follows():
         r = c.at(f)
         assert abs(_eval_ffexpr(cx_e, f + 1) - (r[0] + r[2]) / 2) < 1e-6, f
         assert abs(_eval_ffexpr(w_e, f + 1) - (r[2] - r[0])) < 1e-6, f
-    # 跟随：每个关键帧时刻主体中心都在取景窗内、且窗口尺寸不变
+    # follow: at every keyframe the subject centre is inside the framing window and the window size is unchanged
     ws = set()
     for o in obs:
         f = round(o["t"] * 30)
@@ -240,12 +240,12 @@ def track_expression_matches_python_and_follows():
     assert len(ws) == 1, ws
     p["shots"][0]["camera"][0]["track"] = ["o1", "o0"]
     e = raises("PLAN_INVALID", P.validate, p, obs)
-    assert any("递增" in x for x in e.detail["errors"])
+    assert any("increasing" in x for x in e.detail["errors"])
 
 
 @case
 def mixed_cut_and_xfade_three_shots():
-    """Codex A1：先硬切后 xfade，timebase 不一致曾直接失败。"""
+    """Codex A1: a hard cut followed by xfade used to fail outright because the timebases differed."""
     ff("-f", "lavfi", "-i", "sine=f=300:d=4.2", "-ar", "48000", os.path.join(TMP, "v42.wav"))
     p = base_plan(audio={"voice": "v42.wav"})
     p["shots"] = [{"id": "a", "asset": "img.png", "duration": 1.5, "camera": []},
@@ -261,7 +261,7 @@ def mixed_cut_and_xfade_three_shots():
 
 @case
 def fit_shrink_that_breaks_camera_is_rejected():
-    """Codex A3：缩短末镜后不能返回自己 validator 不接受的 plan。"""
+    """Codex A3: after shortening the last shot, a plan the validator itself rejects must not be returned."""
     ff("-f", "lavfi", "-i", "sine=f=300:d=1.6", "-ar", "48000", os.path.join(TMP, "v16.wav"))
     p = base_plan(duration_policy="fit_last_shot", audio={"voice": "v16.wav"})
     p["shots"][0]["duration"] = p["shots"][1]["duration"] = 2.0
@@ -273,14 +273,14 @@ def fit_shrink_that_breaks_camera_is_rejected():
 
 @case
 def geometry_never_trims_subject():
-    """Codex A7：多 1px 也不能悄悄裁掉。"""
+    """Codex A7: even 1 px too much must not be cropped silently."""
     raises("SUBJECT_TOO_LARGE", camera.fit_viewport, (0, 0, 1000, 1004), 1000, 1600, 1.0, "x")
     assert camera.fit_viewport((0, 0, 1000, 1000), 1000, 1600, 1.0, "x") == (0, 0, 1000, 1000)
 
 
 @case
 def subtitle_blocks_strict():
-    """Codex A6：NOTEBOOK/WEBVTT 开头的正文保留；坏块报错而不是静默丢。"""
+    """Codex A6: text beginning with NOTEBOOK/WEBVTT is kept; a bad block raises an error instead of being dropped silently."""
     f = os.path.join(TMP, "nb.vtt")
     open(f, "w").write("WEBVTT\n\n00:00.000 --> 00:01.000\nNOTEBOOK\n\nNOTE 注释\n\n00:01.000 --> 00:02.000\n"
                        "WEBVTT 开头\n")
@@ -291,13 +291,13 @@ def subtitle_blocks_strict():
 
 @case
 def codex_round3_regressions():
-    # A-new-1：外部提交的 track_boxes 必须被丢弃重算
+    # A-new-1: externally submitted track_boxes must be discarded and recomputed
     p = base_plan(); p["shots"][0]["camera"] = [{"op": "zoom_to", "bbox": [0.6, 0.2, 0.7, 0.4], "t0": 0, "t1": 1,
                                                  "track_boxes": [[0, [0.2, 0.2, 0.4, 0.4]], [1, [0.5, 0.5]]]}]
     P.validate(p)
     assert "track_boxes" not in p["shots"][0]["camera"][0]
     camera.ShotCamera(p["shots"][0], META, 540, 960, 30)
-    # A-new-2：缺空行 / NOTE+tab / 空正文倒置时间
+    # A-new-2: missing blank line / NOTE+tab / empty text with reversed time
     f = os.path.join(TMP, "r3.vtt")
     open(f, "w").write("1\n00:00.000 --> 00:01.000\nfirst\n2\n00:01.000 --> 00:02.000\nsecond\n")
     raises("SUBTITLES_INVALID", subtitles.parse, f)
@@ -305,21 +305,21 @@ def codex_round3_regressions():
     assert subtitles.parse(f) == [(0.0, 1.0, "ok")]
     open(f, "w").write("WEBVTT\n\n00:00.000 --> 00:01.000\nok\n\n00:03.000 --> 00:02.000\n\n")
     raises("SUBTITLES_INVALID", subtitles.parse, f)
-    # B：t=0 的 observation 也要检查源区间
+    # B: an observation at t=0 must also be checked against the source range
     obs = [{"id": "o", "asset": "img.png", "t": 0.0, "bbox": [0.6, 0.2, 0.7, 0.4]}]
     p = base_plan(); p["shots"][0].update(source_in=10)
     p["shots"][0]["camera"] = [{"op": "zoom_to", "observation_id": "o", "t0": 0, "t1": 1}]
     e = raises("PLAN_INVALID", P.validate, p, obs)
-    assert any("源区间" in x for x in e.detail["errors"])
-    # A-new-3：路径末尾空白
+    assert any("source range" in x for x in e.detail["errors"])
+    # A-new-3: trailing whitespace in a path
     from reelcore.render import _fesc
-    os.makedirs(os.path.join(TMP, "trail dir "), exist_ok=True)      # lut3d 按扩展名判类型，空白放在目录名末尾
+    os.makedirs(os.path.join(TMP, "trail dir "), exist_ok=True)      # lut3d decides the type by extension, so the whitespace goes at the end of the directory name
     lut = os.path.join(TMP, "trail dir ", "a.cube")
     open(lut, "w").write("LUT_3D_SIZE 2\n" + "".join(f"{r} {g} {b}\n" for b in (0, 1) for g in (0, 1) for r in (0, 1)))
     r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x64:d=0.1", "-vf",
                         f"lut3d=file={_fesc(lut)},format=yuv420p", "-f", "null", "-"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-200:]
-    # 整条值末尾的空白（lut3d 认扩展名，改用按内容识别格式的 movie 源来测）
+    # whitespace at the end of the whole value (lut3d goes by extension, so test with a movie source that detects the format by content)
     tail = os.path.join(TMP, "tail.png ")
     shutil.copy(IMG, tail)
     r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"movie=filename={_fesc(tail)}", "-frames:v", "1",
@@ -342,7 +342,7 @@ def subtitles_after_end_fail_acceptance():
 
 @case
 def lut_path_with_special_chars():
-    """Codex A8：路径含 ' , [ ] ; : 空格也要能用。"""
+    """Codex A8: paths containing ' , [ ] ; : and spaces must also work."""
     d = os.path.join(TMP, "John's, [x]; y"); os.makedirs(d, exist_ok=True)
     lut = os.path.join(d, "a:b.cube")
     open(lut, "w").write("LUT_3D_SIZE 2\n" + "".join(f"{r} {g} {b}\n" for b in (0, 1) for g in (0, 1) for r in (0, 1)))
@@ -351,7 +351,7 @@ def lut_path_with_special_chars():
     assert r["ok"], [c for c in r["checks"] if not c["ok"]]
 
 
-# ---------- 网页镜头（不做 OCR，位置读 DOM） ----------
+# ---------- web shot (no OCR, positions read from the DOM) ----------
 @case
 def web_find_matches_dom_exactly():
     import importlib.util
@@ -389,9 +389,9 @@ def web_highlight_progress_is_smooth():
     import numpy as np
     d = np.diff(prog)
     assert (d >= -1e-9).all() and abs(prog[-1] - len(page_text)) < 1e-6
-    assert np.abs(np.diff(d)).max() < 0.12, np.abs(np.diff(d)).max()      # 标点处不瞬跳
-    assert abs(prog[18] - 2.0) < 0.25, prog[18]      # 0.3s：「好」讲完一半，逗号在「好」与「世」之间插值 → ≈2.0，跟得上语音
-    # whisper 错一个字也能对上
+    assert np.abs(np.diff(d)).max() < 0.12, np.abs(np.diff(d)).max()      # no sudden jump at punctuation
+    assert abs(prog[18] - 2.0) < 0.25, prog[18]      # 0.3s: half of the second character is spoken and the comma is interpolated between the 2nd and 3rd characters, giving about 2.0, which keeps up with the speech
+    # it still matches when whisper gets one character wrong
     t2 = web.align("关键在于平滑", web.char_timeline([(0, 1.2, "关键再于平滑")]))
     assert len(t2) == 6
 
@@ -399,21 +399,21 @@ def web_highlight_progress_is_smooth():
 @case
 def web_follow_camera_locks_column_and_caps_speed():
     from reelcore import web
-    col = (100, 0, 450, 5000)                                          # 页宽 600，文字列在中间，取景 378 宽有余量
+    col = (100, 0, 450, 5000)                                          # page width 600, the text column in the middle, framing width 378 leaves room
     boxes = [None] * 10 + [(100, 1500, 450, 1530)] * 50 + [(100, 3000, 450, 3030)] * 200
     rects = web.follow_camera(boxes, col, (0, 0, 600, 1067), 9 / 16, 300, 600, 5000, 60, max_speed=0.7)
     import numpy as np
     r = np.array(rects); cx = (r[:, 0] + r[:, 2]) / 2; cy = (r[:, 1] + r[:, 3]) / 2; h = r[:, 3] - r[:, 1]
-    assert np.ptp(cx) < 1e-6 and abs(cx[0] - 275) < 1e-6               # 水平锁定并对准文字列中心
-    assert (r[:, 0] <= 100 + 1e-6).all() and (r[:, 2] >= 450 - 1e-6).all()  # 整行不被切
-    assert abs(cy[0] - 1515) < 1                                      # 从第一行开始，不从页顶甩下来
-    assert (np.abs(np.diff(cy)) / h[1:] * 60).max() <= 0.7 * 1.05     # 峰值速度 ≤ max_speed 画面高/秒
+    assert np.ptp(cx) < 1e-6 and abs(cx[0] - 275) < 1e-6               # locked horizontally on the centre of the text column
+    assert (r[:, 0] <= 100 + 1e-6).all() and (r[:, 2] >= 450 - 1e-6).all()  # whole lines are not cut
+    assert abs(cy[0] - 1515) < 1                                      # starts at the first line instead of swinging down from the page top
+    assert (np.abs(np.diff(cy)) / h[1:] * 60).max() <= 0.7 * 1.05     # peak speed <= max_speed picture-heights per second
 
 
 @case
 def padding_shrinks_before_subject_too_large():
-    """真实项目 2026-09-30：主体放得下，只是 padding 让它超出 → 应自动缩小 padding，而不是报错。"""
-    b = (100, 100, 640, 400)                     # 宽 540，1000 高的竖屏窗最宽 562.5
+    """Real project 2026-09-30: the subject fits and only the padding pushes it out, so the padding should shrink automatically instead of raising an error."""
+    b = (100, 100, 640, 400)                     # width 540; a portrait window 1000 high is at most 562.5 wide
     vp = camera.zoom_target(b, 0.3, 3, 1600, 1000, 540 / 960)
     assert vp[0] <= b[0] + 1e-6 and vp[2] >= b[2] - 1e-6 and vp[1] <= b[1] + 1e-6 and vp[3] >= b[3] - 1e-6
     raises("SUBJECT_TOO_LARGE", camera.zoom_target, (0, 0, 700, 300), 0.3, 3, 1600, 1000, 540 / 960)
@@ -421,12 +421,12 @@ def padding_shrinks_before_subject_too_large():
 
 @case
 def one_frame_short_source_is_padded():
-    """真实项目 2026-09-30：need 7.817s vs source 7.8s 只差 1 帧也报 SOURCE_TOO_SHORT。"""
+    """Real project 2026-09-30: need 7.817s vs source 7.8s, a difference of only 1 frame, still raised SOURCE_TOO_SHORT."""
     vid = os.path.join(TMP, "v3.mp4")
     ff("-f", "lavfi", "-i", "testsrc2=s=540x960:r=30:d=3", "-pix_fmt", "yuv420p", vid)
     ff("-f", "lavfi", "-i", "sine=f=300:d=3.034", "-ar", "48000", os.path.join(TMP, "v3034.wav"))
     p = base_plan(duration_policy="require_match", audio={"voice": "v3034.wav"})
-    p["shots"] = [{"id": "s1", "asset": "v3.mp4", "duration": 3.034, "camera": []}]   # 91 帧 vs 素材 90 帧：差 1 帧
+    p["shots"] = [{"id": "s1", "asset": "v3.mp4", "duration": 3.034, "camera": []}]   # 91 frames vs 90 frames in the media: 1 frame short
     c = render.compile_plan(json.loads(json.dumps(p)))
     assert c["frames"][0] == 91 and "s1" in c["pads"], (c["frames"], c["pads"])
     out = os.path.join(TMP, "pad.mp4")
@@ -434,7 +434,7 @@ def one_frame_short_source_is_padded():
     assert r["ok"] and next(x for x in r["checks"] if x["check"] == "frames")["actual"] == 91, r["checks"]
     ff("-f", "lavfi", "-i", "sine=f=300:d=3.1", "-ar", "48000", os.path.join(TMP, "v31.wav"))
     p = base_plan(duration_policy="require_match", audio={"voice": "v31.wav"})
-    p["shots"] = [{"id": "s1", "asset": "v3.mp4", "duration": 3.1, "camera": []}]   # 超出 3 帧：仍应报错
+    p["shots"] = [{"id": "s1", "asset": "v3.mp4", "duration": 3.1, "camera": []}]   # 3 frames over: should still raise an error
     raises("SOURCE_TOO_SHORT", render.preview_shot, p, "s1", out)
 
 
@@ -443,7 +443,7 @@ def sheet_parses_trailing_comma():
     from reelcore import cli
     import subprocess as sp
     orig = sp.run
-    class R:  # ffprobe 对某些文件输出 "180,"
+    class R:  # ffprobe prints "180," for some files
         stdout = "180,\n"; returncode = 0
     def fake(cmd, *a, **k):
         if cmd[0] == "ffprobe":
@@ -459,7 +459,7 @@ def sheet_parses_trailing_comma():
     assert r["frames"][-1] == 179 and os.path.exists(os.path.join(TMP, "sh.png")), r
 
 
-# ---------- 远程 GPU 闸门 ----------
+# ---------- remote GPU gate ----------
 @case
 def gpu_gate_80_percent():
     info = {"host": "x", "gpu": {"name": "GPU-32G", "used_mib": 20000, "total_mib": 32607, "util_pct": 2}}
@@ -472,7 +472,7 @@ def gpu_gate_80_percent():
 
 @case
 def remote_host_only_from_environment():
-    """远程主机只来自 REEL_REMOTE / REEL_REMOTES；都没设时 probe 不跑 ssh，直接 ok=False。"""
+    """The remote host only comes from REEL_REMOTE / REEL_REMOTES; when neither is set, probe does not run ssh and returns ok=False directly."""
     saved = {k: os.environ.pop(k, None) for k in ("REEL_REMOTE", "REEL_REMOTES")}
     try:
         assert remote.candidates() == []
@@ -495,7 +495,7 @@ def remote_host_only_from_environment():
                 os.environ[k] = v
 
 
-# ---------- 渲染 + 验收（含 BGM+调色同时生效） ----------
+# ---------- render + acceptance (including BGM + colour grade together) ----------
 @case
 def render_end_to_end_with_bgm_and_grade():
     p = base_plan(duration_policy="fit_last_shot",
@@ -512,7 +512,7 @@ def render_end_to_end_with_bgm_and_grade():
 
 @case
 def video_source_in_starts_camera_at_frame_zero():
-    """回归：视频入点 + 运镜时，输出第 0 帧必须是源入点那一帧、且处于初始取景（全画面）。"""
+    """Regression: with a video in-point plus a camera move, output frame 0 must be the source in-point frame and in the initial framing (full picture)."""
     vid = os.path.join(TMP, "count.mp4")
     ff("-f", "lavfi", "-i", "testsrc2=s=540x960:r=30:d=8", "-pix_fmt", "yuv420p", vid)
     p = base_plan(duration_policy="fit_last_shot")
@@ -527,7 +527,7 @@ def video_source_in_starts_camera_at_frame_zero():
     e = subprocess.run(["ffmpeg", "-hide_banner", "-i", ref, "-i", got, "-filter_complex", "[0:v][1:v]ssim", "-f",
                         "null", "-"], capture_output=True, text=True).stderr
     sim = float(re.search(r"All:([0-9.]+)", e).group(1))
-    assert sim > 0.9, f"输出首帧与源 5.0s 不符（SSIM={sim:.3f}），运镜/入点错位"
+    assert sim > 0.9, f"output first frame does not match source 5.0s (SSIM={sim:.3f}); camera move / in-point misaligned"
 
 
 @case
@@ -547,6 +547,6 @@ if __name__ == "__main__":
         print(("✅ " if ok else "❌ ") + name + ("" if ok else "\n   " + msg.replace("\n", "\n   ")))
     for name, why in SKIPPED:
         print(f"⏭️  {name} — SKIPPED: {why}")
-    print(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过" + (f"，{len(SKIPPED)} 项跳过（缺可选依赖）" if SKIPPED else ""))
+    print(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} passed" + (f", {len(SKIPPED)} skipped (optional dependency missing)" if SKIPPED else ""))
     shutil.rmtree(TMP, ignore_errors=True)
     sys.exit(1 if fails else 0)

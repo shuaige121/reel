@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MLT 工程读取与重复用料：python3 tests/test_mlt.py（合成最小 MLT，不依赖外部工程）。"""
+"""MLT project reading and repeated footage: python3 tests/test_mlt.py (a minimal synthetic MLT, no external project needed)."""
 import json, os, shutil, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -60,6 +60,6 @@ except ReelError as e:
     check("0-byte iCloud placeholder rejected", e.code == "MLT_INVALID", e.code)
 r = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, "reel.py"), "mlt", p, "--dupes"], capture_output=True, text=True).stdout)
 check("cli mlt --dupes", r["ok"] and len(r["result"]["duplicates"]) == 1, r)
-print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}")
+print(f"\n{'all passed' if not bad else f'{bad} failed'}")
 shutil.rmtree(T, ignore_errors=True)
 sys.exit(1 if bad else 0)

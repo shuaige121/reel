@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""MV 契约与歌词时间源的故障注入矩阵（无需 pytest）：python3 tests/test_mv.py
+"""Fault-injection matrix for the MV contract and the lyrics timing source (no pytest needed): python3 tests/test_mv.py
 
-合成一首带内嵌歌词流的「歌」、一支 MV、一份字层；每个检查都注入故障证明会拦，同时跑合格对照证明不误拦。
+Synthesises a "song" with an embedded lyrics stream, an MV and a text layer; every check gets an injected fault to prove it blocks, and a passing control run to prove it does not block wrongly.
 1 reel lyrics import/verify   2 song_identity / av_duration / song_level   3 lyrics_on_screen / lyrics_not_early
 """
 import hashlib, json, os, shutil, subprocess, sys, tempfile, traceback
@@ -86,7 +86,7 @@ def make_mv(name, audio_filter="anull", vdur=DUR, adur=None):
 
 
 def make_layer(name, lines, shift=0.0, drop=None):
-    """字层：每句在 [t0+shift, t1+0.2] 期间，每个字一块白方块（逐字在行内均分出现）。"""
+    """Text layer: during [t0+shift, t1+0.2] of each line, a white block per character (characters appear evenly spread across the line)."""
     enc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{W}x{H}",
                             "-r", str(FPS), "-i", "-", "-c:v", "ffv1", "-pix_fmt", "gray", P(name)], stdin=subprocess.PIPE)
     sung = [(t, s) for t, s in lines if s]
@@ -229,7 +229,7 @@ def _effects(name, kind):
 
 def audio_effects_declared_pass():
     wav, mv = _effects("fx", "beeps")
-    it, g, rc = check(mv, contract("c_fx.json", None, effects={"path": wav, "sha256": sha(wav), "reason": "用户：加音效"}))
+    it, g, rc = check(mv, contract("c_fx.json", None, effects={"path": wav, "sha256": sha(wav), "reason": "user: add sound effects"}))
     for k in ("contract_files", "song_identity", "song_level"):
         assert it[k]["status"] == "pass", (k, it[k])
     return "song + declared effects layer passes"
@@ -242,7 +242,7 @@ def audio_effects_undeclared_fails():
 
 def audio_effects_disguised_gain_fails():
     wav, mv = _effects("fxg", "gain")
-    it, g, rc = check(mv, contract("c_fxg.json", None, effects={"path": wav, "sha256": sha(wav), "reason": "用户：加音效"}))
+    it, g, rc = check(mv, contract("c_fxg.json", None, effects={"path": wav, "sha256": sha(wav), "reason": "user: add sound effects"}))
     assert it["song_identity"]["status"] == "fail" and any("effects_song_corr" in e for e in it["song_identity"]["evidence"]), it["song_identity"]
 
 
@@ -277,53 +277,53 @@ def text_layer_wrong_length_fails():
 
 
 def contract_required_cannot_be_dropped():
-    """profile 去掉不了契约的必查项：lyrics 有、text_layer 没给 → 契约本身不合法。"""
+    """A profile cannot remove the contract's required checks: lyrics given but text_layer missing makes the contract itself invalid."""
     c = j(P("c_tok.json")); c.pop("text_layer"); j(P("c_nolayer.json"), c)
     d, rc = reel("check", P("ok.mp4"), "--contract", P("c_nolayer.json"))
     assert rc == 1 and d["error"]["code"] == "CONTRACT_INVALID", d
 
 
 def lyrics_end_fix_only_shortens_with_evidence():
-    """行尾更正：只许提前、必须有证据、cue 号和原文都要对；改了更正文件 verify 就作废。"""
-    ok = j(P("fix_ok.json"), [{"cue": 2, "text": "第二句也要唱", "t1": 5.5, "evidence": "逐字时间：最后一个字 5.4 s 唱完，之后是器乐"}])
+    """Line-end corrections: they may only move earlier, must have evidence, and both the cue number and the text must match; changing the correction file voids verify."""
+    ok = j(P("fix_ok.json"), [{"cue": 2, "text": "第二句也要唱", "t1": 5.5, "evidence": "per-word timing: the last word ends at 5.4 s, then instrumental"}])
     d, rc = reel("lyrics", "import", P("song.m4a"), "--lyrics", P("lyrics.md"), "--out", P("lyrics_fix.json"), "--end-fixes", ok)
     assert rc == 0 and d["result"]["end_fixes"][0]["t1"] == 5.5, d
     ln = next(x for x in j(P("lyrics_fix.json"))["lines"] if x["cue_id"] == 2)
     assert ln["t1"] == 5.5 and ln["t1_stream"] == 6.5, ln
     d, rc = reel("lyrics", "verify", P("lyrics_fix.json")); assert rc == 0, d
     for name, bad in (("longer", {"t1": 7.0}), ("noev", {"evidence": "短"}), ("text", {"text": "别的句子"}), ("cue", {"cue": 99})):
-        f = {"cue": 2, "text": "第二句也要唱", "t1": 5.5, "evidence": "逐字时间：最后一个字 5.4 s 唱完", **bad}
+        f = {"cue": 2, "text": "第二句也要唱", "t1": 5.5, "evidence": "per-word timing: the last word ends at 5.4 s", **bad}
         d, rc = reel("lyrics", "import", P("song.m4a"), "--lyrics", P("lyrics.md"), "--out", P(f"lyrics_bad_{name}.json"),
                      "--end-fixes", j(P(f"fix_{name}.json"), [f]))
         assert rc == 1 and d["error"]["code"] == "LYRICS_END_FIX_INVALID" and not os.path.exists(P(f"lyrics_bad_{name}.json")), (name, d)
-    j(ok, [{"cue": 2, "text": "第二句也要唱", "t1": 5.0, "evidence": "改过的证据，时间也改了"}])
+    j(ok, [{"cue": 2, "text": "第二句也要唱", "t1": 5.0, "evidence": "changed evidence, the time changed too"}])
     d, rc = reel("lyrics", "verify", P("lyrics_fix.json"))
     assert rc == 1 and d["error"]["code"] == "LYRICS_STALE", d
-    return "提前+证据 → 采用并记下原行尾；拉长/没证据/原文不对/cue 不存在 → 拒；更正文件改了 → LYRICS_STALE"
+    return "earlier + evidence is adopted and the original line end recorded; lengthened / no evidence / wrong text / missing cue is refused; a changed correction file gives LYRICS_STALE"
 
 
 def mv_brief(name):
-    pdir = P(name); root = P(name + "-交付"); os.makedirs(pdir, exist_ok=True); os.makedirs(root, exist_ok=True)
+    pdir = P(name); root = P(name + "-delivery"); os.makedirs(pdir, exist_ok=True); os.makedirs(root, exist_ok=True)
     return j(os.path.join(pdir, "brief.json"), {"version": "reel.brief.v1", "name": "测试MV", "kind": "mv", "language": "zh-CN",
                                                 "deliverable": "sample", "delivery_root": root, "must_not_change": ["歌"],
                                                 "voice": {"mode": "recorded"}})
 
 
 def gate_mv_brief_requires_contract():
-    """brief 标 kind=mv：check、deliver --sample 不带契约都拒；带契约就不再报这个错。"""
+    """A brief with kind=mv: check and deliver --sample are refused without a contract; with a contract this error no longer appears."""
     bp = mv_brief("p_mvgate")
     d, rc = reel("check", P("ok.mp4"), "--brief", bp)
     assert rc == 1 and d["error"]["code"] == "MV_CONTRACT_REQUIRED" and "template" in d["error"]["detail"], d
     d, rc = reel("deliver", P("ok.mp4"), "--brief", bp, "--version", "v1", "--sample")
     assert rc == 1 and d["error"]["code"] == "MV_CONTRACT_REQUIRED", d
-    assert not os.listdir(P("p_mvgate-交付")), "被拒后交付目录必须是空的"
+    assert not os.listdir(P("p_mvgate-delivery")), "after a refusal the delivery directory must be empty"
     d, rc = reel("check", P("ok.mp4"), "--brief", bp, "--contract", P("c_tok.json"))
     assert d.get("error", {}).get("code") != "MV_CONTRACT_REQUIRED" and "result" in d, d
-    return "kind=mv 无契约 → check/deliver 都报 MV_CONTRACT_REQUIRED（带模板），交付目录不落文件；带契约正常检查"
+    return "kind=mv without a contract: check/deliver both report MV_CONTRACT_REQUIRED (with a template) and nothing lands in the delivery directory; with a contract the check runs normally"
 
 
 def gate_contract_requires_brief_kind():
-    """带了契约、brief 却没写 kind=mv：必须报 BRIEF_KIND_MISSING；写了 kind=mv 就不报；没有 brief 只带契约不拦。"""
+    """A contract was given but the brief lacks kind=mv: BRIEF_KIND_MISSING must be raised; with kind=mv it is not; a contract without any brief is not blocked."""
     bp = mv_brief("p_kind")
     b = j(bp); b.pop("kind"); nk = j(os.path.join(os.path.dirname(bp), "brief_nokind.json"), b)
     d, rc = reel("check", P("ok.mp4"), "--brief", nk, "--contract", P("c_tok.json"))
@@ -332,18 +332,18 @@ def gate_contract_requires_brief_kind():
     assert d.get("error", {}).get("code") != "BRIEF_KIND_MISSING" and "result" in d, d
     d, rc = reel("check", P("ok.mp4"), "--contract", P("c_tok.json"))
     assert d.get("error", {}).get("code") != "BRIEF_KIND_MISSING" and "result" in d, d
-    return "同一份契约：brief 去掉 kind → BRIEF_KIND_MISSING；带 kind=mv、或没有 brief → 不报"
+    return "same contract: a brief without kind gives BRIEF_KIND_MISSING; with kind=mv, or with no brief, nothing is reported"
 
 
 def gate_handwritten_lyrics_refused():
-    """契约里的 lyrics 必须是 reel lyrics import 的输出，且对应契约里的歌。"""
+    """The lyrics in a contract must be the output of reel lyrics import and belong to the contract's song."""
     L = j(P("lyrics.json")); L["version"] = "my.timing"; j(P("lyrics_hand.json"), L)
     d, rc = reel("check", P("ok.mp4"), "--contract", contract("c_hand.json", P("tl_ok.mkv"), lyrics=P("lyrics_hand.json")))
     assert rc == 1 and d["error"]["code"] == "CONTRACT_INVALID" and "reel.lyrics.v1" in d["error"]["message"], d
     L = j(P("lyrics.json")); L["song"]["sha256"] = "1" * 64; j(P("lyrics_other.json"), L)
     d, rc = reel("check", P("ok.mp4"), "--contract", contract("c_other.json", P("tl_ok.mkv"), lyrics=P("lyrics_other.json")))
     assert rc == 1 and d["error"]["code"] == "CONTRACT_INVALID" and "song.sha256" in d["error"]["message"], d
-    return "手写时间表 / 别的歌的歌词 → CONTRACT_INVALID"
+    return "a hand-written timetable / lyrics of another song gives CONTRACT_INVALID"
 
 
 if __name__ == "__main__":

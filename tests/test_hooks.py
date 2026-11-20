@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""交付目录 Bash guard + 完成闸门（Stop hook）故障注入。python3 tests/test_hooks.py [--log FILE]
+"""Fault injection for the delivery-directory Bash guard + the completion gate (Stop hook). python3 tests/test_hooks.py [--log FILE]
 
-hook 用 /usr/bin/python3 子进程跑（hooks.json 里同样用系统 python3），状态目录用临时的 REEL_STATE_DIR。
+The hooks run as /usr/bin/python3 subprocesses (hooks.json also uses the system python3) and the state directory is a temporary REEL_STATE_DIR.
 """
 import datetime, json, os, shutil, subprocess, sys, tempfile, traceback
 
@@ -30,9 +30,9 @@ def ff(*a):
     subprocess.run([shutil.which("ffmpeg"), "-y", "-v", "error", *a], check=True)
 
 
-# ---------- 一个登记任务（真跑 reel register）----------
+# ---------- a registered task (really runs reel register) ----------
 PROJ = os.path.join(TMP, "proj")
-ROOTDIR = os.path.join(TMP, "iCloud 交付", "客户A")          # 带空格和中文，像 iCloud 路径
+ROOTDIR = os.path.join(TMP, "iCloud 交付", "客户A")          # with a space and Chinese, like an iCloud path
 OTHER = os.path.join(TMP, "iCloud 交付", "别的项目")
 for d in (PROJ, ROOTDIR, OTHER, os.path.join(PROJ, "素材")):
     os.makedirs(d, exist_ok=True)
@@ -127,16 +127,16 @@ ALLOW = [
 @case("7a Bash guard")
 def denies_writes_into_registered_root():
     missed = [c for c in DENY if not guard(c)]
-    assert not missed, "没拦住：\n" + "\n".join(missed)
-    return f"{len(DENY)} 种写法全部拒绝（cp/mv/rsync/ditto/-t、ffmpeg 输出、重定向、tee、cd 后相对路径、deliver 后再 cp/mv、" \
-           "变量目标、python -c / heredoc、符号链接、rm/touch、reel render --out、多行脚本、find -delete、ssh）"
+    assert not missed, "not blocked: \n" + "\n".join(missed)
+    return f"all {len(DENY)} forms are refused (cp/mv/rsync/ditto/-t, ffmpeg output, redirects, tee, relative paths after cd, cp/mv after deliver, " \
+           "variable targets, python -c / heredoc, symlinks, rm/touch, reel render --out, multi-line scripts, find -delete, ssh)"
 
 
 @case("7a Bash guard")
 def allows_reads_materials_and_deliver():
     wrong = [(c, guard(c)) for c in ALLOW if guard(c)]
-    assert not wrong, "误拦：\n" + "\n".join(f"{c}\n  → {w}" for c, w in wrong)
-    return f"{len(ALLOW)} 种读/素材/未登记目录/reel deliver/receipt/check（含 PREFLIGHT 函数定义）全部放行"
+    assert not wrong, "wrongly blocked: \n" + "\n".join(f"{c}\n  → {w}" for c, w in wrong)
+    return f"all {len(ALLOW)} forms pass: reads / media / unregistered directories / reel deliver / receipt / check (including a PREFLIGHT function definition)"
 
 
 @case("7a Bash guard")
@@ -145,7 +145,7 @@ def silent_without_registry_or_bad_input():
     assert all(guard(c, state=empty) is None for c in DENY)
     p = subprocess.run([HOOK_PY, GUARD], input="not json", capture_output=True, text=True, env=ENV)
     assert p.returncode == 0 and p.stdout == ""
-    return "没有登记任务 → 全部放行；输入不是 JSON → 静默放行"
+    return "no registered task means everything passes; input that is not JSON passes silently"
 
 
 @case("7a Bash guard")
@@ -158,10 +158,10 @@ def unregister_releases_root():
         r = subprocess.run([sys.executable, REEL, "register", BRIEF], capture_output=True, text=True, env=ENV)
         assert r.returncode == 0, r.stdout
     assert guard(DENY[0])
-    return "reel register --remove 后不再拦；重新登记后恢复"
+    return "after reel register --remove it no longer blocks; registering again restores it"
 
 
-# ---------- 完成闸门（Stop hook）----------
+# ---------- completion gate (Stop hook) ----------
 def iso(dt):
     return dt.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -202,15 +202,15 @@ PY_BUILD = [("cd ~/projects/promo && python3 build_video.py", "rendering 12 card
 CLAIM_DONE = "宣传视频已完成，成片在 iCloud 交付夹 final.mp4，可以发了。"
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def python_bypass_claim_is_blocked():
     tp = transcript("promo", PY_BUILD, CLAIM_DONE)
     why = gate(tp, CLAIM_DONE, session="s-py")
     assert why and "reel deliver" in why, why
-    return "自写 build_video.py 出片 + Python 复制进交付夹（guard 看不到）+「已完成」→ 拦"
+    return "a self-written build_video.py output + a Python copy into the delivery folder (invisible to the guard) + 'done' is blocked"
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def direct_ffmpeg_render_claim_is_blocked():
     msg = "成片已导出好了：~/projects/p/out/v2.mp4"
     for cmd in ("cd ~/projects/p && ffmpeg -y -i a.mov -i voice.m4a -c:v libx264 out/v2.mp4",
@@ -218,10 +218,10 @@ def direct_ffmpeg_render_claim_is_blocked():
                 "python3 ~/src/reel/reel.py render plan.json --out out/v2.mp4",
                 "python3 -u make_reel_v2.py --out out/v2.mp4"):
         assert gate(transcript("ff", [(cmd, "")], msg), msg, session="s-ff-" + cmd[:6]), cmd
-    return "ffmpeg（含绝对路径/环境变量前缀）、reel.py render、make_*.py 出片后声称完成、没有回执 → 拦"
+    return "a done claim after ffmpeg (also with an absolute path / environment prefix), reel.py render or make_*.py output without a receipt is blocked"
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def honest_status_passes():
     out = []
     for msg in ("v1 已导出，这是待审样片，声音还没试听。", "片子已经做好了，但还未试听，状态是待试听。",
@@ -232,12 +232,12 @@ def honest_status_passes():
         out.append(msg[:10])
     for msg in ("视频完成，文件：final.mp4", "视频已完成，旧版未通过，新版可以发了。", "旧版待审。新版成片已经做好了，可以发了。"):
         assert gate(transcript("mixed", PY_BUILD, msg), msg, session="s-mixed-" + msg[:4]), msg
-    return (f"如实标注（同句或下一句：待审样片/待试听/未交付；全文：本轮无视频交付）→ 放行 {len(out)} 例；"
-            "「视频完成」裸说、「旧版未通过，新版可以发了」、隔句的「待审」→ 拦")
+    return (f"an honest status (same or next sentence: sample pending review / awaiting audition / not delivered; whole text: no video delivered this turn) passes {len(out)} cases; "
+            "a bare \"video is done\", \"old version failed, the new one can be posted\", and a \"pending review\" in a later sentence are blocked")
 
 
 def deliver_real(version, sample=False):
-    """真跑 reel deliver（合格片 + 有效审片记录），回执写进本测试的 STATE。"""
+    """Really run reel deliver (a passing video + valid review records); the receipt is written to this test's STATE."""
     from_dir = os.path.join(TMP, "media")
     os.makedirs(from_dir, exist_ok=True)
     v = os.path.join(from_dir, f"good-{version}.mp4")
@@ -264,7 +264,7 @@ def deliver_real(version, sample=False):
 FINAL_STATE = os.path.join(TMP, "state-final")
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def final_receipt_must_be_this_turns_and_after_last_render():
     shutil.copytree(STATE, FINAL_STATE)
     global ENV
@@ -282,22 +282,22 @@ def final_receipt_must_be_this_turns_and_after_last_render():
     v1 = "v1 已交付，可以发了。"
     assert gate(ok_tp, v1, session="s-f1b", state=FINAL_STATE) is None
     v2 = "v2 已交付，可以发了。"
-    assert gate(ok_tp, v2, session="s-f1c", state=FINAL_STATE), "声称 v2 却只有 v1 回执"
+    assert gate(ok_tp, v2, session="s-f1c", state=FINAL_STATE), "claims v2 but only a v1 receipt exists"
     re_tp = transcript("final-rerender", [deliv, (build[0], build[1], later)], CLAIM_DONE)
-    assert gate(re_tp, CLAIM_DONE, session="s-f2", state=FINAL_STATE), "deliver 之后又出片，旧回执不能背书"
+    assert gate(re_tp, CLAIM_DONE, session="s-f2", state=FINAL_STATE), "video was produced again after deliver, so the old receipt cannot vouch for it"
     other_tp = transcript("final-other", [build], CLAIM_DONE)
-    assert gate(other_tp, CLAIM_DONE, session="s-f3", state=FINAL_STATE), "本轮没 deliver，别处的回执不能背书"
+    assert gate(other_tp, CLAIM_DONE, session="s-f3", state=FINAL_STATE), "this turn did not deliver, so a receipt elsewhere cannot vouch for it"
     with open(rec["delivered"], "ab") as fh:
         fh.write(b"x")
-    assert gate(ok_tp, CLAIM_DONE, session="s-f4", state=FINAL_STATE), "交付文件被改后应当拦"
-    with open(rec["delivered"], "r+b") as fh:          # 复原，后面的用例还要用这张回执
+    assert gate(ok_tp, CLAIM_DONE, session="s-f4", state=FINAL_STATE), "must block after the delivered file was changed"
+    with open(rec["delivered"], "r+b") as fh:          # restore it; later cases still need this receipt
         fh.truncate(os.path.getsize(rec["delivered"]) - 1)
     assert gate(ok_tp, CLAIM_DONE, session="s-f5", state=FINAL_STATE) is None
-    return ("先出片再 deliver → 放行；声称 v2 只有 v1 回执 → 拦；deliver 后又出片 → 拦；本轮没 deliver、"
-            "状态目录里有别的回执 → 拦；交付文件事后被改 → 拦")
+    return ("produce then deliver passes; claiming v2 with only a v1 receipt is blocked; producing again after deliver is blocked; this turn did not deliver and "
+            "the state directory holds another receipt is blocked; the delivered file changed afterwards is blocked")
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def sample_receipt_requires_saying_sample():
     st = os.path.join(TMP, "state-sample")
     shutil.copytree(STATE, st)
@@ -313,10 +313,10 @@ def sample_receipt_requires_saying_sample():
     assert why and "待审样片" in why, why
     msg = "v5 已交付到 iCloud，是待审样片，等你试听。"
     assert gate(tp, msg, session="s-sample", state=st) is None
-    return "只有待审样片回执却说「成片已完成」→ 拦；说明是待审样片 → 放行"
+    return "claiming 'the video is done' with only a sample receipt is blocked; saying it is a sample pending review passes"
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def registered_project_without_production_still_needs_receipt():
     msg = "v3 做好了，放在交付夹了。"
     tp = transcript("proj", [("ls out/", "final.mp4")], msg, prompt="好了没有")
@@ -328,11 +328,11 @@ def registered_project_without_production_still_needs_receipt():
     assert gate(tp2, "v2 做好了，在交付夹。", cwd=PROJ, session="s-proj4", state=FINAL_STATE)
     dev = "视频测试都完成了。检查器改好了，视频相关的单测也做完了。"
     assert gate(transcript("dev", [("python3 tests/test_gate.py", "36/36")], dev), dev, cwd=PROJ, session="s-dev") is None
-    return ("登记项目里没回执却说「做好了」→ 拦；不在登记项目 → 不管；有本项目 v1 回执时回答「成片在哪」→ 放行，"
-            "声称 v2 → 拦；只说视频测试/检查器完成 → 不拦")
+    return ("'it is done' in a registered project without a receipt is blocked; outside a registered project it is ignored; answering 'where is the video' with a v1 receipt of this project passes, "
+            "claiming v2 is blocked; saying only that video tests / the checker are done is not blocked")
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def no_false_block_on_unrelated_or_scratch_work():
     m1 = "部署完成了，网站已经上线。"
     assert gate(transcript("web", [("npm run build", "ok")], m1), m1, session="s-web") is None
@@ -351,10 +351,10 @@ def no_false_block_on_unrelated_or_scratch_work():
     assert gate(transcript("commit", cm, m6), m6, session="s-commit") is None
     m3 = "我会先渲染，完成后把视频放进交付夹。"
     assert gate(transcript("future", PY_BUILD, m3), m3, session="s-future") is None
-    return "非视频任务的「完成」、临时目录里的测试渲染、heredoc 改文档里出现 reel render、「完成后我会…」→ 都不拦"
+    return "'done' of a non-video task, a test render in a temp directory, reel render appearing in a heredoc that edits docs, and 'after it is done I will...' are none blocked"
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def english_claims_and_honest_status():
     for msg in ("The video is done: final.mp4 is ready to post.", "v2 is finished and delivered.",
                 "The final cut is ready. You can post it now."):
@@ -364,11 +364,11 @@ def english_claims_and_honest_status():
                 "All tests pass. No video delivered this turn; I only changed the checker code.",
                 "The unit tests are done and the docs are updated."):
         assert gate(transcript("en-honest", PY_BUILD, msg), msg, session="s-en-honest") is None, msg
-    return "English: bare 'video is done / v2 delivered / final cut ready' → blocked; 'sample pending review', " \
-           "'not delivered', 'no video delivered this turn', dev-only 'tests are done' → allowed"
+    return "English: bare 'video is done / v2 delivered / final cut ready' is blocked; 'sample pending review', " \
+           "'not delivered', 'no video delivered this turn' and dev-only 'tests are done' are allowed"
 
 
-@case("7b 完成闸门")
+@case("7b completion gate")
 def blocks_at_most_five_times_per_turn():
     tp = transcript("loop", PY_BUILD, CLAIM_DONE)
     got = [bool(gate(tp, CLAIM_DONE, session="s-loop")) for _ in range(7)]
@@ -376,7 +376,7 @@ def blocks_at_most_five_times_per_turn():
     assert "released after 5 blocks" in open(os.path.join(STATE, "stopgate.log"), encoding="utf-8").read()
     p = subprocess.run([HOOK_PY, GATE], input="garbage", capture_output=True, text=True, env=ENV)
     assert p.returncode == 0 and p.stdout == ""
-    return "同一轮重复声称：拦 5 次后才放行（防 hook 误判死循环）并记 stopgate.log；坏输入静默"
+    return "repeated claims in one turn: blocked 5 times, then passed (to avoid an endless loop from a hook misjudgement) and logged in stopgate.log; bad input passes silently"
 
 
 if __name__ == "__main__":
@@ -384,7 +384,7 @@ if __name__ == "__main__":
     lines = [f"{'✅' if ok else '❌'} [{g}] {n}" + (f" — {m}" if ok and m else ("" if ok else "\n   " + m.replace("\n", "\n   ")))
              for g, n, ok, m in RESULTS]
     fails = [r for r in RESULTS if not r[2]]
-    lines.append(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过（hook 解释器 {HOOK_PY}）")
+    lines.append(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} passed (hook interpreter {HOOK_PY})")
     print("\n".join(lines))
     if log:
         open(log, "w", encoding="utf-8").write("\n".join(lines) + "\n")
