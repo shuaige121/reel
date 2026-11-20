@@ -160,9 +160,11 @@ def deliver(video, brief_path, version, c=None, plan_path=None, profile_ref=None
     fr = g["final_reviews"]
     approved_by = None if sample else ("human" if any(fr[k] and not gate.is_agent(fr[k]["by"]) for k in ("final_watch", "final_listen"))
                                         else "agent")
-    statement = "已复制到交付目录并校验 hash" + (
-        "；成片由 agent 审过（看片＋听片），用户还没看，他提意见就出下一版" if approved_by == "agent" else
-        "；不代表用户已观看或认可" + ("；这是待审样片，不是成片" if sample else ""))
+    statement = "copied to the delivery folder and hash-verified" + (
+        "; final cut reviewed by the agent (watched and listened); the user has not seen it yet, and their feedback"
+        " becomes the next version" if approved_by == "agent" else
+        "; this does not mean the user has watched or approved it"
+        + ("; this is a sample pending review, not a final cut" if sample else ""))
     receipt = {
         "version": RECEIPT_VERSION, "status": "sample_pending_review" if sample else "final",
         "name": b["name"], "label": version, "created_at": _now(),

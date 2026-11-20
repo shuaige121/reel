@@ -749,7 +749,7 @@ def final_listen_agent_needs_observations():
     out, code = deliver(GOOD, bp, "v1", "--reviews", agent_listen)
     passed(out, code)
     assert out["result"]["status"] == "final" and out["result"]["approved_by"] == "agent", out["result"]
-    assert "用户还没看" in out["result"]["statement"], out["result"]["statement"]
+    assert "the user has not seen it yet" in out["result"]["statement"], out["result"]["statement"]
     bp2, _, pdir2 = project("p_listen_human")
     out, code = deliver(GOOD, bp2, "v1", "--reviews", final_reviews(GOOD, "rv_humanlisten.json"))
     passed(out, code)
@@ -797,7 +797,7 @@ def receipt_binds_hashes_and_makes_no_viewing_claim():
     passed(out, code)
     r = out["result"]
     assert r["delivered_sha256"] == r["video_sha256"] == sha(GOOD) and r["copy_verified"] is True
-    assert "不代表用户已观看" in r["statement"]
+    assert "does not mean the user has watched" in r["statement"]
     h = r["hashes"]
     assert h["brief"] == sha(bp) and h["reviews"] == sha(rv) and h["report"] == sha(r["paths"]["report"]) and h["profile"]
     rc = json.load(open(r["receipt"], encoding="utf-8"))
