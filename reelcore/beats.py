@@ -1,10 +1,10 @@
-"""节拍分析 + 卡点吸附。
+"""Beat analysis plus cut-to-beat snapping.
 
-analyze()：音乐 → 节拍、强拍（每小节第一拍）、BPM。
-  - beat_this（2024，CPJKU，同时出拍与强拍，精度高）为默认；
-  - librosa 为兜底（只出拍；强拍按 4/4 取重音最强的相位推断，标注 downbeat_method=inferred）。
-  两者都跑在 reel 自己的 venv（$REEL_VENV，默认 ~/.local/share/reel/venv；./install.sh --beats 安装），系统 Python 不需要装任何东西。
-snap_boundaries()：把镜头切点吸附到最近的拍/强拍（在 tolerance 内），保证最短镜头时长。
+analyze()：music to beats, downbeats (first beat of each bar) and BPM.
+  - beat_this (2024, CPJKU, outputs beats and downbeats together, high accuracy) is the default;
+  - librosa is the fallback (beats only; downbeats are inferred in 4/4 from the strongest-accent phase and marked downbeat_method=inferred).
+  Both run in reel's own venv ($REEL_VENV, default ~/.local/share/reel/venv; installed by ./install.sh --beats); the system Python needs nothing installed.
+snap_boundaries()：snaps shot cut points to the nearest beat / downbeat (within tolerance) while guaranteeing a minimum shot duration.
 """
 import json, os, subprocess
 from .errors import ReelError
@@ -19,18 +19,18 @@ import librosa
 y, sr = librosa.load(path, sr=22050, mono=True)
 dur = len(y) / sr
 out = {"duration": round(dur, 4)}
-HOP = 256   # 11.6ms 分辨率（默认 512 为 23ms）
+HOP = 256   # 11.6ms resolution (the default 512 is 23ms)
 def lib():
     tempo, bt = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP, units="time", trim=False)
     beats = np.atleast_1d(bt).astype(float)
-    # 起音强度的峰值总在击打之后；把每个拍点对齐到 ±60ms 内最近的「击打起点」（backtrack 到能量谷）
+    # the onset-strength peak always comes after the hit; align each beat to the nearest "hit start" within +-60ms (backtrack to the energy valley)
     ons = librosa.onset.onset_detect(y=y, sr=sr, hop_length=HOP, units="time", backtrack=True)
     if len(ons):
         idx = np.clip(np.searchsorted(ons, beats), 1, len(ons) - 1)
         near = np.where(np.abs(ons[idx - 1] - beats) < np.abs(ons[idx] - beats), ons[idx - 1], ons[idx])
         beats = np.where(np.abs(near - beats) <= 0.06, near, beats)
     beats = [float(b) for b in beats]
-    # 强拍推断：4/4 下 4 个相位里，拍点处起音强度总和最大的相位即强拍
+    # downbeat inference: of the 4 phases in 4/4, the phase with the largest summed onset strength at the beats is the downbeat
     env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP)
     fr = librosa.time_to_frames(beats, sr=sr, hop_length=HOP)
     fr = np.clip(fr, 0, len(env) - 1)
@@ -48,13 +48,13 @@ if backend in ("auto", "beat_this"):
         ib = np.diff(beats)
         ref = float(np.median(ib)) if len(ib) else 0.0
         glob_t = float(np.atleast_1d(librosa.feature.tempo(y=y, sr=sr))[0])
-        if glob_t > 0 and 1.6 <= (60 / glob_t) / max(ref, 1e-6) <= 2.4:   # 多余点多到中位拍距塌成半拍
+        if glob_t > 0 and 1.6 <= (60 / glob_t) / max(ref, 1e-6) <= 2.4:   # so many extra points that the median beat interval collapses to half a beat
             ref = 60 / glob_t
         crowd = float(np.mean(ib < 0.6 * ref)) if len(ib) else 0.0
         if crowd > 0.10:
-            # 拍点里 >10% 挤在两拍之间（常见于只有鼓点/反拍的稀疏节奏）：beat_this 的拍网格不可信，改用起音校正后的 librosa
-            raise RuntimeError(f"beat_this 拍点过密（{crowd:.0%} 间隔 <0.6 拍距）")
-        # 去掉挤在正常拍之间的多余点（切分音被误当成拍）：间隔 <0.6 个中位拍距时，只留更贴近均匀网格的那个
+            # more than 10% of the beats are squeezed between two beats (common with sparse rhythms of only drum hits / off-beats): the beat_this grid is unreliable, so use onset-corrected librosa instead
+            raise RuntimeError(f"beat_this beats are too dense ({crowd:.0%} of intervals are under 0.6 beat)")
+        # remove extra points squeezed between normal beats (syncopation mistaken for beats): when the interval is under 0.6 median beat intervals, keep only the one closer to the uniform grid
         if len(beats) > 4:
             med = float(np.median(np.diff(beats)))
             keep = [beats[0]]
@@ -66,22 +66,22 @@ if backend in ("auto", "beat_this"):
                     if abs(x - ref) < abs(keep[-1] - ref):
                         keep[-1] = x
             beats = np.array(keep)
-        # 强拍规整：模型给的强拍常有漏报/多报（合成节奏里第 1、2 拍都会被标）。按「拍序号 mod 4」投票选小节相位，
-        # 打平时用起音重音决定，然后每 4 拍取一个 → 规律的小节网格；原始强拍另存
+        # downbeat regularisation: the downbeats from the model are often missed or duplicated (in synthetic rhythms both beat 1 and 2 get marked). Vote for the bar phase by "beat index mod 4",
+        # break ties with the onset accent, then take one every 4 beats to get a regular bar grid; the raw downbeats are stored separately
         votes = np.zeros(4)
         for x in raw_d:
             k = int(np.argmin(np.abs(beats - x)))
             if abs(beats[k] - x) < 0.07:
                 votes[k % 4] += 1
         env0 = librosa.onset.onset_strength(y=y, sr=sr, hop_length=256)
-        # 起音强度峰值在击打之后几十毫秒：取拍点后 ~60ms 窗口内的最大值作为该拍的重音
+        # the onset-strength peak comes tens of milliseconds after the hit: take the maximum in a ~60ms window after the beat as that beat's accent
         env = np.array([env0[i:i + 6].max() if i < len(env0) else 0 for i in range(len(env0))])
         fr = np.clip(librosa.time_to_frames(beats, sr=sr, hop_length=256), 0, len(env) - 1)
         accent = np.array([env[fr[p::4]].mean() if len(fr[p::4]) else 0 for p in range(4)])
         best = votes.max()
         cands = [p for p in range(4) if votes[p] >= best - 1e-9]
         ph = max(cands, key=lambda p: accent[p])
-        # 分段（每 16 拍）投票：漏拍/多拍后小节相位会漂，逐段重新对齐；段内票不足时沿用全局相位
+        # vote per segment (every 16 beats): after missed or extra beats the bar phase drifts, so re-align per segment; with too few votes in a segment, keep the global phase
         near_k = []
         for x in raw_d:
             k = int(np.argmin(np.abs(beats - x)))
@@ -96,13 +96,13 @@ if backend in ("auto", "beat_this"):
                 top = [q for q in range(4) if v[q] >= v.max() - 1e-9]
                 if len(top) == 1:
                     loc = top[0]
-                else:                                   # 打平：比这一段里各相位拍点的起音重音
+                else:                                   # tie: compare the onset accents of the beats of each phase within this segment
                     seg = fr[s0:s0 + 16]; idx = np.arange(s0, s0 + len(seg))
                     loc = max(top, key=lambda q: env[seg[idx % 4 == q]].mean() if np.any(idx % 4 == q) else 0)
             else:
                 loc = ph
             for k in range(s0, min(s0 + 16, len(beats))):
-                if k % 4 == loc and k - last >= 3:          # 相位切换处避免两个强拍挨得太近
+                if k % 4 == loc and k - last >= 3:          # avoid two downbeats too close together where the phase switches
                     downs.append(beats[k]); last = k
         downs = np.array(downs)
         ibi = np.diff(beats)
@@ -125,33 +125,33 @@ print(json.dumps(out))
 
 def analyze(audio_path, backend="auto", timeout=600):
     if not os.path.isfile(audio_path):
-        raise ReelError("ASSET_NOT_FOUND", f"音频不存在: {audio_path}")
+        raise ReelError("ASSET_NOT_FOUND", f"audio does not exist: {audio_path}")
     if not os.path.exists(VENV_PY):
         raise ReelError("BACKEND_UNAVAILABLE", "beat analysis needs the reel venv with librosa (and optionally beat_this/torch): run ./install.sh --beats",
                         venv=VENV_PY)
-    # beat_this 读取要求 wav/常见格式；统一先转 44.1k 单声道 wav，避免 mp3 解码差异
+    # beat_this needs wav or common formats; first convert everything to 44.1k mono wav to avoid mp3 decoding differences
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         wav = os.path.join(td, "a.wav")
         p = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", audio_path, "-ac", "1", "-ar", "44100", wav],
                            capture_output=True, text=True)
         if p.returncode != 0:
-            raise ReelError("FFMPEG_FAILED", "音频解码失败", stderr=p.stderr[-400:])
+            raise ReelError("FFMPEG_FAILED", "audio decoding failed", stderr=p.stderr[-400:])
         p = subprocess.run([VENV_PY, "-c", _WORKER, wav, backend], capture_output=True, text=True, timeout=timeout)
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith("{")]
     if p.returncode != 0 or not lines:
-        raise ReelError("BEATS_FAILED", "节拍分析失败", stderr=p.stderr[-800:])
+        raise ReelError("BEATS_FAILED", "beat analysis failed", stderr=p.stderr[-800:])
     res = json.loads(lines[-1])
     if "error" in res:
         raise ReelError("BEATS_FAILED", res["error"])
     if len(res.get("beats", [])) < 4:
-        raise ReelError("BEATS_FAILED", "检出的拍点太少（音乐太短或没有明显节奏）", beats=len(res.get("beats", [])))
+        raise ReelError("BEATS_FAILED", "too few beats detected (the music is too short or has no clear rhythm)", beats=len(res.get("beats", [])))
     res["source"] = audio_path
     return res
 
 
 def grid(beats_info, mode="beat"):
-    """mode: beat（每拍）| downbeat（强拍）| every:N（每 N 拍）| half（半拍，拍间插中点）。"""
+    """mode: beat (every beat) | downbeat | every:N (every N beats) | half (half beats, a midpoint inserted between beats)."""
     b = beats_info["beats"]
     if mode == "beat":
         return list(b)
@@ -165,16 +165,16 @@ def grid(beats_info, mode="beat"):
     if mode.startswith("every:"):
         n = int(mode.split(":")[1])
         d = beats_info.get("downbeats") or []
-        start = b.index(min(b, key=lambda t: abs(t - d[0]))) if d else 0   # 从第一个强拍开始数
+        start = b.index(min(b, key=lambda t: abs(t - d[0]))) if d else 0   # count from the first downbeat
         return b[start::n]
-    raise ReelError("ARG_INVALID", f"未知卡点模式 {mode!r}（beat / downbeat / every:N / half）")
+    raise ReelError("ARG_INVALID", f"unknown beat-snap mode {mode!r} (beat / downbeat / every:N / half)")
 
 
 def snap_boundaries(bounds, targets, tolerance=0.30, min_gap=0.35, offset=0.0, fallback=None, feasible=None):
-    """bounds：原切点（秒，严格递增，不含片头 0 和片尾）。targets：拍点（音乐时间）；offset：音乐在时间线上的起点。
-    每个切点吸附到 tolerance 内最近且保持 ≥min_gap 间隔的拍点；强拍不行就退到 fallback（普通拍）。
-    feasible(i, t, prev)：可选约束（例如镜头时长必须容纳运镜/转场/源长度），不满足的拍点不选。
-    找不到就保持原位，报告里 reason=no_beat（容差内没有拍）或 constraint（有拍但会让镜头不合法）。返回 (新切点, 报告)。"""
+    """bounds: original cut points (seconds, strictly increasing, excluding the start 0 and the end). targets: beat points (music time); offset: where the music starts on the timeline.
+    Each cut snaps to the nearest beat within tolerance that keeps a gap of at least min_gap; if a downbeat does not work it falls back to fallback (ordinary beats).
+    feasible(i, t, prev): optional constraint (e.g. the shot duration must fit camera move / transition / source length); beats that fail it are not chosen.
+    If none is found the cut stays where it was, with reason=no_beat in the report (no beat within tolerance) or constraint (a beat exists but would make the shot invalid). Returns (new cuts, report)."""
     tg = sorted(t + offset for t in targets)
     fb = sorted(t + offset for t in (fallback or []))
     ok = feasible or (lambda i, t, prev: True)
@@ -202,8 +202,8 @@ def snap_boundaries(bounds, targets, tolerance=0.30, min_gap=0.35, offset=0.0, f
 
 
 def _duration_limits(c, observations, trans):
-    """每个镜头允许的时长区间 [lo, hi]（秒），与 plan 校验/编译的规则一致：
-    运镜与手动高亮的 t1、两侧转场的 2 倍、视频镜头引用的 observation 时间点、视频源剩余长度。"""
+    """Allowed duration range [lo, hi] (seconds) for each shot, consistent with the plan validation/compile rules:
+    the t1 of camera moves and manual highlights, twice the transitions on each side, the observation time points referenced by video shots, and the remaining length of the video source."""
     fps = c["plan"]["output"]["fps"]
     obs = {o["id"]: o for o in (observations or []) if isinstance(o, dict) and "id" in o}
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -227,9 +227,9 @@ def _duration_limits(c, observations, trans):
 
 
 def snap_plan(plan, beats_info, mode="downbeat", tolerance=0.30, min_gap=0.35, offset=0.0, observations=None):
-    """按拍点调整 plan 的镜头时长，使硬切/转场起点落在拍上。只改 duration，不改顺序与运镜。
-    切点定义为下一镜头在时间线上的起点（有转场时即转场开始）。observations 供 zoom_to 引用校验。
-    只选不会让镜头变得不合法的拍点（运镜 t1 放不下、转场过长、视频源不够长）；选不到就保持原位并在报告里说明。"""
+    """Adjust the shot durations of a plan to the beats so that hard cuts / transition starts land on beats. Only duration changes, never order or camera moves.
+    A cut is defined as the start of the next shot on the timeline (the start of the transition when there is one). observations is used to validate zoom_to references.
+    Only beats that do not make a shot invalid are chosen (camera t1 does not fit, transition too long, video source too short); if none is found the cut stays and the report says why."""
     import copy
     from . import render
     c = render.compile_plan(copy.deepcopy(plan), observations)
@@ -239,7 +239,7 @@ def snap_plan(plan, beats_info, mode="downbeat", tolerance=0.30, min_gap=0.35, o
     end = (c["starts"][-1] + c["frames"][-1]) / fps
     bounds = starts[1:]
     lo, hi = _duration_limits(c, observations, trans)
-    nxt = bounds[1:] + [end]                 # 下一个切点先按原位估计：它没吸附上时镜头 i+1 也必须合法
+    nxt = bounds[1:] + [end]                 # the next cut is first estimated at its original position: shot i+1 must also be valid if that cut does not snap
 
     def feasible(i, t, prev):
         d_i, d_n = t - prev + trans[i], nxt[i] - t + trans[i + 1]
@@ -251,9 +251,9 @@ def snap_plan(plan, beats_info, mode="downbeat", tolerance=0.30, min_gap=0.35, o
     p = copy.deepcopy(plan)
     edges = [0.0] + new_b
     for i, s in enumerate(p["shots"][:-1]):
-        # 镜头 i 在时间线上占 [edges[i], edges[i+1]) 再加上它与下一镜头的转场重叠
+        # shot i occupies [edges[i], edges[i+1]) on the timeline plus its transition overlap with the next shot
         s["duration"] = round(edges[i + 1] - edges[i] + trans[i], 4)
     if c["plan"]["duration_policy"] == "require_match":
-        p["shots"][-1]["duration"] = round(end - edges[-1], 4)   # 总长不变，否则 DURATION_MISMATCH
+        p["shots"][-1]["duration"] = round(end - edges[-1], 4)   # total length unchanged, otherwise DURATION_MISMATCH
     return p, {"mode": mode, "tolerance": tolerance, "cuts": report,
                "snapped": sum(1 for r in report if not r.get("unsnapped")), "total": len(report)}

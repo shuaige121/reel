@@ -1,4 +1,4 @@
-"""成片验收：以产物本身为准，任何一项不过 ok=False（调用方据此非零退出，不打印「完成」）。"""
+"""Final-video acceptance: the artefact itself decides; any failing item gives ok=False (the caller exits non-zero and does not print "done")."""
 import json, subprocess
 
 
@@ -26,7 +26,7 @@ def check(path, expect_s, fps, width, height, subs_cues=None, expect_audio=True,
     if v:
         add("size", (int(v["width"]), int(v["height"])) == (width, height), actual=[v["width"], v["height"]],
             expect=[width, height])
-        num, den = (int(x) for x in v.get("r_frame_rate", "0/1").split("/"))   # mpv 会把末帧标 discard，avg 会偏
+        num, den = (int(x) for x in v.get("r_frame_rate", "0/1").split("/"))   # mpv marks the last frame as discard, which skews avg
         add("fps", den and abs(num / den - fps) < 0.01, actual=round(num / den, 3) if den else None, expect=fps)
         nf = int(v.get("nb_read_frames") or 0)
         exp_f = round(expect_s * fps)
@@ -44,7 +44,7 @@ def check(path, expect_s, fps, width, height, subs_cues=None, expect_audio=True,
         vd_ = float(v.get("duration") or 0) if v else 0.0
         late = [[round(a, 3), round(b, 3)] for a, b, _ in subs_cues if a >= vd_ - 0.05 or b > vd_ + tol_s]
         add("subtitles_in_range", bool(subs_cues) and not late, cues=len(subs_cues), out_of_range=late,
-            note="字幕时间已核对；可读性仍需抽帧目检")
+            note="subtitle timing was checked; readability still needs a visual check on sampled frames")
     return {"ok": all(c["ok"] for c in checks), "out": path, "checks": checks}
 
 

@@ -1,11 +1,11 @@
-"""网页镜头：文字位置直接读 DOM（不做 OCR），镜头与高亮都由浏览器逐帧绘制。
+"""Web shots: text positions are read straight from the DOM (no OCR); both the camera and the highlight are drawn frame by frame by the browser.
 
-- 定位：按原文在 DOM 里找 Range，getClientRects 得到每个字符的精确框（文档 CSS 像素）。
-- 镜头：CSS transform（translate+scale，小数像素）作用在 <html> 上，浏览器按当前缩放重新栅格化，推近字不虚；
-  以 2 倍输出分辨率截图再缩小（超采样），压住字形对齐像素网格带来的闪动。
-- 高亮：按行放置的绝对定位高亮条，宽度按连续进度精确到小数像素（不是逐字跳格）；
-  进度曲线来自语音逐字时间，单调化 + 低通 + 略微提前，刷的速度连续。
-- 渲染确定性：逐帧设置状态 → 截图，不依赖页面实时动画；页面自身动画/过渡全部禁用。
+- Locating: find a Range in the DOM by the source text; getClientRects gives the exact box of every character (document CSS pixels).
+- Camera: a CSS transform (translate+scale, fractional pixels) on <html>; the browser re-rasterises at the current scale so pushed-in text stays sharp;
+  screenshots are taken at 2x the output resolution and scaled down (supersampling) to suppress flicker from glyphs snapping to the pixel grid.
+- Highlight: absolutely positioned highlight bars placed per line, with width following continuous progress to fractional pixels (not jumping character by character);
+  the progress curve comes from per-word voice timing, made monotonic, low-passed and slightly advanced, so the sweep speed is continuous.
+- Deterministic rendering: set the state frame by frame, then screenshot; nothing depends on live page animation, and the page's own animations/transitions are all disabled.
 """
 import json, math, os, subprocess
 from .errors import ReelError
@@ -21,7 +21,7 @@ html { overflow: hidden !important; transform-origin: 0 0 !important; scroll-beh
               box-shadow: 0 0 0 200000px rgba(0,0,0,0.55); opacity: 0; }
 """
 
-# 在页面里执行：按原文找 Range，返回每个字符的框（文档坐标）。空白归一化后匹配，跨节点也能找到。
+# Runs in the page: find a Range by the source text and return the box of every character (document coordinates). Matching is done after whitespace normalisation and also works across nodes.
 FIND_JS = r"""
 ([target, occurrence]) => {
   const norm = s => s.replace(/\s+/g, '');
@@ -71,7 +71,7 @@ SET_FRAME_JS = r"""
   if (!dm) { dm = document.createElement('div'); dm.id = '__reel_dim'; el.appendChild(dm); }
   if (dim) { const [x, y, w, h, a] = dim; dm.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;opacity:${a}`; }
   else dm.style.opacity = 0;
-  return document.body.getBoundingClientRect().top;   // 强制同步布局
+  return document.body.getBoundingClientRect().top;   // force synchronous layout
 }
 """
 
@@ -80,12 +80,12 @@ def _pw():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise ReelError("BACKEND_UNAVAILABLE", "网页镜头需要 Python playwright（pip install playwright && playwright install chromium）")
+        raise ReelError("BACKEND_UNAVAILABLE", "web shots need Python playwright (pip install playwright && playwright install chromium)")
     return sync_playwright
 
 
 class Page:
-    """打开网页并做好渲染准备。layout_w：页面排版宽度（CSS px）；视口高度按输出比例。"""
+    """Open the page and prepare it for rendering. layout_w: page layout width (CSS px); the viewport height follows the output aspect ratio."""
 
     def __init__(self, url, out_w, out_h, layout_w, css="", wait_ms=800):
         self.out_w, self.out_h, self.layout_w = out_w, out_h, layout_w
@@ -100,7 +100,7 @@ class Page:
             self.page.goto(target, wait_until="networkidle", timeout=60000)
         except Exception as e:  # noqa: BLE001
             self.close()
-            raise ReelError("WEB_LOAD_FAILED", f"网页打不开: {e}", url=url)
+            raise ReelError("WEB_LOAD_FAILED", f"cannot open the page: {e}", url=url)
         self.page.add_style_tag(content=BASE_CSS + (css or ""))
         self.page.evaluate("document.fonts ? document.fonts.ready : null")
         self.page.evaluate("window.scrollTo(0, 0)")
@@ -111,13 +111,13 @@ class Page:
     def find(self, text, occurrence=1):
         r = self.page.evaluate(FIND_JS, [text, occurrence])
         if r.get("error") == "NOT_FOUND":
-            raise ReelError("TEXT_NOT_FOUND", f"页面里找不到这段文字（已忽略空白）: {text[:40]}", occurrences=r.get("count"))
+            raise ReelError("TEXT_NOT_FOUND", f"this text was not found on the page (whitespace ignored): {text[:40]}", occurrences=r.get("count"))
         if r.get("error"):
-            raise ReelError("TEXT_NOT_FOUND", f"文字为空: {text!r}")
+            raise ReelError("TEXT_NOT_FOUND", f"empty text: {text!r}")
         return r["chars"], r["text"]
 
     def frame(self, cam_rect, hls, dim):
-        """cam_rect: 文档坐标下的取景窗 (x0,y0,x1,y1)。返回 PNG 字节（输出分辨率 × SUPERSAMPLE）。"""
+        """cam_rect: framing window in document coordinates (x0,y0,x1,y1). Returns PNG bytes (output resolution x SUPERSAMPLE)."""
         s = self.layout_w / (cam_rect[2] - cam_rect[0])
         self.page.evaluate(SET_FRAME_JS, [[cam_rect[0], cam_rect[1], s], hls, dim])
         return self.page.screenshot(type="png", animations="disabled", caret="hide")
@@ -129,10 +129,10 @@ class Page:
             self._ctx.stop()
 
 
-# ---------------- 文字 → 行 → 连续高亮 ----------------
+# ---------------- text to lines to continuous highlight ----------------
 
 def lines_of(chars):
-    """把逐字框按行分组：[(行框 x0,y0,x1,y1, 该行字符下标列表)]。"""
+    """Group the per-character boxes by line: [(line box x0,y0,x1,y1, list of character indices on that line)]."""
     lines = []
     for i, c in enumerate(chars):
         if lines and abs(((c[1] + c[3]) / 2) - ((lines[-1][0][1] + lines[-1][0][3]) / 2)) < (c[3] - c[1]) * 0.5 \
@@ -145,7 +145,7 @@ def lines_of(chars):
 
 
 def highlight_rects(chars, progress, color, pad=2.0):
-    """progress ∈ [0, len(chars)]，可以是小数：第 k 个字刷到一半就是 k+0.5。返回按行的高亮条。"""
+    """progress is in [0, len(chars)] and may be fractional: character k half swept is k+0.5. Returns the highlight bars per line."""
     out = []
     for (x0, y0, x1, y1), idx in lines_of(chars):
         a, b = idx[0], idx[-1] + 1
@@ -166,7 +166,7 @@ def bbox_of(chars):
     return [min(c[0] for c in chars), min(c[1] for c in chars), max(c[2] for c in chars), max(c[3] for c in chars)]
 
 
-# ---------------- 语音 → 逐字时间 → 平滑进度曲线 ----------------
+# ---------------- voice to per-word timing to smooth progress curve ----------------
 
 def _norm(s):
     import re
@@ -174,7 +174,7 @@ def _norm(s):
 
 
 def char_timeline(events):
-    """[(start, end, text)] → [(char, t_start, t_end)]，句内按字数均分（逐字时间来自 whisper 时本来就是逐字）。"""
+    """[(start, end, text)] → [(char, t_start, t_end)]，within a sentence, time is shared evenly by character count (when the word timing comes from whisper it is already per character)."""
     out = []
     for a, b, t in events:
         cs = [c for c in _norm(t)]
@@ -187,17 +187,17 @@ def char_timeline(events):
 
 
 def align(target, timeline, min_ratio=0.6):
-    """把页面原文对齐到语音逐字时间线（容忍 whisper 的个别错字）。返回每个目标字的 (t_start, t_end)。"""
+    """Align the page text to the per-word voice timeline (tolerating the odd whisper error). Returns (t_start, t_end) for every target character."""
     import difflib
     tgt = _norm(target)
     spoken = "".join(c for c, _, _ in timeline)
     if not tgt:
-        raise ReelError("TEXT_NOT_IN_VOICE", "目标文字为空")
+        raise ReelError("TEXT_NOT_IN_VOICE", "target text is empty")
     sm = difflib.SequenceMatcher(None, spoken, tgt, autojunk=False)
     blocks = [b for b in sm.get_matching_blocks() if b.size]
     matched = sum(b.size for b in blocks)
     if matched / len(tgt) < min_ratio:
-        raise ReelError("TEXT_NOT_IN_VOICE", f"配音里找不到这段文字（匹配 {matched}/{len(tgt)} 字）: {target[:30]}",
+        raise ReelError("TEXT_NOT_IN_VOICE", f"this text was not found in the voice-over (matched {matched}/{len(tgt)} characters): {target[:30]}",
                         matched=matched, need=len(tgt))
     pos = {}
     for b in blocks:
@@ -208,7 +208,7 @@ def align(target, timeline, min_ratio=0.6):
     for j in range(len(tgt)):
         if j in pos:
             _, s, e = timeline[pos[j]]
-        else:                                  # 没对上的字：在前后已知字之间线性插值
+        else:                                  # unmatched characters: linearly interpolate between the known characters before and after
             lo = max([k for k in known if k < j], default=None)
             hi = min([k for k in known if k > j], default=None)
             ts = timeline[pos[lo]][2] if lo is not None else timeline[pos[hi]][1]
@@ -221,7 +221,7 @@ def align(target, timeline, min_ratio=0.6):
 
 
 def spread_to_page(page_text, word_times):
-    """word_times 只覆盖文字字符（_norm 后）；铺回页面字符。标点记为 None，由进度曲线在前后文字之间插值。"""
+    """word_times covers only text characters (after _norm); it is spread back over the page characters. Punctuation is None and the progress curve interpolates across it between the surrounding text."""
     out, k = [], 0
     for ch in page_text:
         if _norm(ch):
@@ -229,14 +229,14 @@ def spread_to_page(page_text, word_times):
         else:
             out.append(None)
     if k != len(word_times):
-        raise ReelError("TEXT_MISMATCH", "页面文字与对齐结果字数不一致", page_words=k, voice=len(word_times))
+        raise ReelError("TEXT_MISMATCH", "page text and alignment result differ in character count", page_words=k, voice=len(word_times))
     return out
 
 
 def progress_curve(times, fps, n_frames, t_offset, lead=0.08, smooth_s=0.10):
-    """逐帧进度（0..字符数，小数，连续）。
-    节点只取文字字符的起讲时刻 (t_i, i)，最后一个字的结束时刻对应满格；标点不设节点，自然插值过去（不会瞬跳）。
-    再做高斯低通（σ=smooth_s）与单调化，整体提前 lead 秒。"""
+    """Per-frame progress (0..number of characters, fractional, continuous).
+    Nodes are only the start times (t_i, i) of text characters, with the end of the last character mapping to full; punctuation has no node and is interpolated across naturally (no sudden jump).
+    Then apply a Gaussian low-pass (sigma=smooth_s) and make it monotonic, advancing the whole curve by lead seconds."""
     import numpy as np
     knots_t, knots_p = [], []
     for i, tt in enumerate(times):
@@ -245,7 +245,7 @@ def progress_curve(times, fps, n_frames, t_offset, lead=0.08, smooth_s=0.10):
     last = max(i for i, tt in enumerate(times) if tt is not None)
     knots_t.append(max(times[last][1], knots_t[-1] + 1e-3)); knots_p.append(float(len(times)))
     kt = np.maximum.accumulate(np.array(knots_t))
-    kt = kt + np.arange(len(kt)) * 1e-6            # 严格递增，np.interp 需要
+    kt = kt + np.arange(len(kt)) * 1e-6            # strictly increasing, as np.interp requires
     ts = np.array([t_offset + f / fps + lead for f in range(n_frames)])
     prog = np.interp(ts, kt, np.array(knots_p), left=0.0, right=float(len(times)))
     sig = smooth_s * fps
@@ -256,12 +256,12 @@ def progress_curve(times, fps, n_frames, t_offset, lead=0.08, smooth_s=0.10):
     return np.maximum.accumulate(np.clip(prog, 0, len(times))).tolist()
 
 
-# ---------------- 镜头跟随：舒适区 + 缓动 ----------------
+# ---------------- camera follow: comfort zone + easing ----------------
 
 def follow_camera(line_boxes_by_frame, column, start_rect, aspect, zoom_w, doc_w, doc_h, fps, comfort=0.28,
                   move_s=0.6, col_pad=14.0, max_speed=0.7, start="first_line"):
-    """阅读式跟随：取景宽度至少容纳整列文字（不切行首行尾），水平固定对准文字列，只在垂直方向跟随正在讲的行。
-    当前行离开取景窗垂直方向的舒适区（中心 ±comfort）时才启动一次缓动移动；最后离线平滑速度折角。"""
+    """Reading-style follow: the framing width fits at least the whole text column (no line starts or ends cut off), is fixed horizontally on the column, and follows only the line being spoken vertically.
+    An eased move starts only when the current line leaves the vertical comfort zone of the framing window (centre +-comfort); finally the speed kinks are smoothed offline."""
     import numpy as np
     n = len(line_boxes_by_frame)
     w = min(doc_w, max(zoom_w, column[2] - column[0] + 2 * col_pad))
@@ -270,7 +270,7 @@ def follow_camera(line_boxes_by_frame, column, start_rect, aspect, zoom_w, doc_w
     cx, cy = (start_rect[0] + start_rect[2]) / 2, (start_rect[1] + start_rect[3]) / 2
     cw = start_rect[2] - start_rect[0]
     first = next((b for b in line_boxes_by_frame if b is not None), None)
-    if start == "first_line" and first is not None:      # 直接从第一句所在位置开始，不从页顶甩下来
+    if start == "first_line" and first is not None:      # start directly at the first sentence's position instead of swinging down from the page top
         cx, cw = tx, w
         cy = min(max((first[1] + first[3]) / 2, h / 2), doc_h - h / 2)
     rects, move = [], None
@@ -284,7 +284,7 @@ def follow_camera(line_boxes_by_frame, column, start_rect, aspect, zoom_w, doc_w
                 off = abs(by - cy) / (cw / aspect)
                 if abs(cw - w) > 1 or abs(cx - tx) > 1 or off > comfort:
                     ty = min(max(by, h / 2), doc_h - h / 2)
-                    # 时长随距离增加：峰值速度（余弦缓动约为平均的 π/2 倍）不超过 max_speed 个画面高度/秒
+                    # duration grows with distance: the peak speed (about pi/2 times the average for cosine easing) does not exceed max_speed picture-heights per second
                     dist = max(abs(ty - cy) / h, abs(tx - cx) / w, abs(math.log(w / cw)))
                     dur = max(move_s, dist * math.pi / 2 / max_speed)
                     move = (f, f + max(2, int(round(dur * fps))), (cx, cy, cw), (tx, ty, w))
@@ -310,10 +310,10 @@ def follow_camera(line_boxes_by_frame, column, start_rect, aspect, zoom_w, doc_w
     return [tuple(r) for r in arr.tolist()]
 
 
-# ---------------- 渲染一个网页镜头 ----------------
+# ---------------- render one web shot ----------------
 
 def render_shot(shot, n, fps, out_w, out_h, t_offset, voice_timeline, seg_enc, out_path, log=print):
-    """shot["web"]: {url, layout_width, css, occurrence}; shot["camera"]/["highlight"] 里写原文。"""
+    """shot["web"]: {url, layout_width, css, occurrence}; shot["camera"]/["highlight"] hold the source text."""
     web = shot["web"]
     aspect = out_w / out_h
     pg = Page(web["url"], out_w, out_h, web.get("layout_width") or (390 if out_w < out_h else 1280), web.get("css", ""))
@@ -324,7 +324,7 @@ def render_shot(shot, n, fps, out_w, out_h, t_offset, voice_timeline, seg_enc, o
             chars, page_text = pg.find(h["text"], h.get("occurrence", 1))
             if h.get("sync", "voice") == "voice":
                 if not voice_timeline:
-                    raise ReelError("TEXT_NOT_IN_VOICE", "highlight 要跟随配音，但没有字幕/逐字时间")
+                    raise ReelError("TEXT_NOT_IN_VOICE", "highlight must follow the voice-over, but there are no subtitles / per-word timing")
                 times = spread_to_page(page_text, align(page_text, voice_timeline))
             else:
                 t0, t1 = h["t0"] + t_offset, h["t1"] + t_offset
@@ -333,7 +333,7 @@ def render_shot(shot, n, fps, out_w, out_h, t_offset, voice_timeline, seg_enc, o
             prog = progress_curve(times, fps, n, t_offset, lead=h.get("lead", 0.08))
             items.append({"chars": chars, "prog": prog, "color": h.get("color", "rgba(255,221,0,0.65)"),
                           "style": h.get("style", "marker"), "lines": lines_of(chars)})
-        # 镜头：follow = 跟随正在讲的行；也支持 zoom_to 原文（一次性推到某段）
+        # camera: follow = follow the line being spoken; zoom_to source text (push to a passage once) is also supported
         cam = shot.get("camera", [])
         zoom_w = pg.layout_w / (cam[0].get("zoom", 1.8) if cam else 1.0)
         rects = None
@@ -368,7 +368,7 @@ def render_shot(shot, n, fps, out_w, out_h, t_offset, voice_timeline, seg_enc, o
             rects = [sc.at(f) for f in range(n)]
         else:
             rects = [top] * n
-        # 逐帧：设置镜头与高亮 → 截图 → 管道送 ffmpeg（超采样缩回输出尺寸）
+        # per frame: set camera and highlight, screenshot, pipe to ffmpeg (supersampled, scaled back to the output size)
         ff = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "image2pipe", "-framerate", str(fps), "-i", "-",
                                "-vf", f"scale={out_w}:{out_h}:flags=lanczos,format=yuv420p,setsar=1",
                                "-frames:v", str(n)] + seg_enc + ["-r", str(fps), out_path],
@@ -392,7 +392,7 @@ def render_shot(shot, n, fps, out_w, out_h, t_offset, voice_timeline, seg_enc, o
         ff.stdin.close()
         err = ff.stderr.read().decode()
         if ff.wait() != 0:
-            raise ReelError("FFMPEG_FAILED", "网页镜头编码失败", stderr=err[-800:])
+            raise ReelError("FFMPEG_FAILED", "web shot encoding failed", stderr=err[-800:])
         return {"doc": [pg.doc_w, pg.doc_h], "layout": [pg.layout_w, pg.layout_h],
                 "items": [{"chars": it["chars"], "lines": [lb for lb, _ in it["lines"]]} for it in items],
                 "trace": trace}

@@ -1,9 +1,9 @@
-"""编译后时间线：把 v1 plan 映射成只读虚拟轨道，给决策层（LLM）读。
+"""Compiled timeline: maps a v1 plan onto read-only virtual tracks for the decision layer (the LLM) to read.
 
-轨道：V1 镜头 / C1 字幕 cue / A1 配音（句子，可展开到词）/ BGM。
-所有区间都是半开区间 [start_f, end_f)，单位为输出帧；镜头起止直接取自 compile_plan 的
-frames / trans / starts，不另算一遍（test_timeline 逐帧断言一致）。
-字幕、句子、词的秒数按 round(t*fps) 量化到帧；这是显示用的量化，不包含转写本身的误差。
+Tracks: V1 shots / C1 subtitle cues / A1 voice-over (sentences, expandable to words) / BGM.
+All ranges are half-open [start_f, end_f) in output frames; shot starts and ends are taken directly from compile_plan's
+frames / trans / starts and not recomputed (test_timeline asserts they match frame by frame).
+Seconds of subtitles, sentences and words are quantised to frames with round(t*fps); this is display quantisation and does not include transcription error itself.
 """
 import json, math
 from . import plan as planmod, subtitles
@@ -25,7 +25,7 @@ def _q(t, fps):
 
 
 def sentences(plan, fps):
-    """audio.subtitles 的每一块 = 一句配音（时间来自字幕文件，timing_method=subtitle_file）。"""
+    """Each block of audio.subtitles is one voice-over sentence (timing comes from the subtitle file, timing_method=subtitle_file)."""
     au = plan["audio"]
     if not au.get("subtitles"):
         return [], []
@@ -35,7 +35,7 @@ def sentences(plan, fps):
         sid = f"sent-{k + 1:02d}"
         sents.append({"id": sid, "start_s": round(a, 3), "end_s": round(b, 3), "start_f": _q(a, fps),
                       "end_f": _q(b, fps), "text": t, "timing_method": "subtitle_file"})
-        for ca, cb, ct in subtitles.cues([(a, b, t)]):      # cues() 逐事件独立处理，逐条调用结果相同
+        for ca, cb, ct in subtitles.cues([(a, b, t)]):      # cues() handles each event independently, so calling it one by one gives the same result
             cues.append({"id": f"cue-{len(cues) + 1:02d}", "start_s": round(ca, 3), "end_s": round(cb, 3),
                          "start_f": _q(ca, fps), "end_f": _q(cb, fps), "text": ct, "sentence": sid})
     return sents, cues
@@ -58,7 +58,7 @@ def words(plan, fps):
 
 
 def build(c, detail="events", revision=None):
-    """compile_plan 的结果 → 时间线 dict。detail=words 时 A1 附逐词。"""
+    """The result of compile_plan becomes a timeline dict. With detail=words, A1 carries per-word entries."""
     plan = c["plan"]
     fps = plan["output"]["fps"]
     frames, trans, starts = c["frames"], c["trans"], c["starts"]
@@ -104,7 +104,7 @@ def build(c, detail="events", revision=None):
 
 
 def parse_range(spec, fps, total_f):
-    """'A:B'（秒，可省略一端）→ 帧区间 [fa, fb)。"""
+    """'A:B' (seconds, either end may be omitted) to a frame range [fa, fb)."""
     if not spec:
         return 0, total_f
     a, _, b = spec.partition(":")
@@ -112,7 +112,7 @@ def parse_range(spec, fps, total_f):
     fb = int(math.ceil(float(b) * fps - 1e-9)) if b.strip() else total_f
     from .errors import ReelError
     if not (0 <= fa < fb):
-        raise ReelError("ARG_INVALID", f"--range 需要 A<B（秒）: {spec}")
+        raise ReelError("ARG_INVALID", f"--range needs A<B (seconds): {spec}")
     return fa, fb
 
 
@@ -121,7 +121,7 @@ def _hit(e, fa, fb):
 
 
 def clip(tl, fa, fb):
-    """只保留与 [fa, fb) 相交的事件（事件本身不裁剪，保留真实起止）。"""
+    """Keep only events that intersect [fa, fb) (events themselves are not trimmed; their real start and end are kept)."""
     out = dict(tl)
     tr = tl["tracks"]
     a1 = dict(tr["A1"][0])
@@ -177,7 +177,7 @@ def text(tl):
 
 
 def active_at(tl, f):
-    """第 f 帧活跃的事件 ID（scrub 用）。"""
+    """IDs of the events active at frame f (used by scrub)."""
     tr = tl["tracks"]
     hit = lambda e: e["start_f"] <= f < e["end_f"]
     act = {"V1": [e["id"] for e in tr["V1"] if hit(e)], "C1": [e["id"] for e in tr["C1"] if hit(e)],

@@ -1,6 +1,6 @@
-"""文本禁用词扫描：brief、plan 里的可见文字、字幕、显式附加文本。
+"""Banned-word scan: brief, visible text in the plan, subtitles, explicitly supplied text.
 
-只证明「这些输入文本」不含禁用词；PNG、录屏、成片画面里的字没有 OCR，不在覆盖范围内。
+It only proves that "these input texts" contain no banned words; text inside PNGs, screen recordings or the final picture is not OCR-ed and is out of scope.
 """
 import json, os, re
 from . import subtitles
@@ -35,7 +35,7 @@ def _plan_strings(plan):
 
 
 def collect(brief=None, plan=None, plan_subs=None, subs=(), texts=()):
-    """返回 [(kind, 文件, [(位置, 文本)]) 或 (kind, 文件, None=缺文件)]。"""
+    """Returns [(kind, file, [(position, text)]) or (kind, file, None = missing file)]."""
     out = []
     if brief:
         try:
@@ -57,7 +57,7 @@ def collect(brief=None, plan=None, plan_subs=None, subs=(), texts=()):
                 else:
                     with open(f, encoding="utf-8") as fh:
                         lines = [(f"L{i}", s) for i, s in enumerate(fh.read().splitlines(), 1)]
-            except Exception:  # noqa: BLE001  读不了等同缺失，不能当作扫过
+            except Exception:  # noqa: BLE001  an unreadable file counts as missing, never as scanned
                 lines = None
             out.append((kind, f, lines))
     return out
@@ -82,11 +82,11 @@ def scan(sources, profile):
     banned = list(dict.fromkeys((t.get("banned") or []) + (t.get("extra_banned") or [])))
     allow = t.get("allow") or []
     require = set(t.get("require") or [])
-    rule = (f"禁用词 {len(banned)} 个（profile text.banned + extra_banned），text.allow 覆盖的整词放行；"
-            "缺失或读不了的输入文件 → fail；只覆盖输入文本，画面里的字没有 OCR")
+    rule = (f"{len(banned)} banned words (profile text.banned + extra_banned); whole words covered by text.allow pass; "
+            "a missing or unreadable input file means fail; only input text is covered, text in the picture is not OCR-ed")
     if not sources and not require:
         return {"status": "not_checked", "rule": rule, "measured": {"sources": 0},
-                "evidence": [], "note": "没有提供可扫描的文本（--brief / --plan 字幕 / --subs / --text）"}
+                "evidence": [], "note": "no scannable text was supplied (--brief / --plan subtitles / --subs / --text)"}
     ev, n_lines = [], 0
     kinds = {k for k, _, lines in sources if lines is not None}
     for kind, f, lines in sources:

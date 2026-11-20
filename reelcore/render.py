@@ -1,8 +1,8 @@
-"""编译 + 执行：EditPlan → 逐镜头片段 → 拼接/转场 → 配音/BGM/调色/字幕 → 成片 → 验收。
+"""Compile and execute: EditPlan, per-shot clips, concat/transitions, voice/BGM/colour/subtitles, final video, acceptance.
 
-时间线以配音为准，统一量化到帧：
-  可视帧数 = Σ镜头帧数 − Σ转场重叠帧数，必须与配音帧数一致（require_match），或由最后一个镜头补齐（fit_last_shot）。
-backend 只决定编码器和字幕烧录方式，不各自维护时间线数学。
+The timeline follows the voice-over and is quantised to frames:
+  visible frames = sum of shot frames - sum of transition overlap frames; it must equal the voice-over frame count (require_match), or the last shot makes up the difference (fit_last_shot).
+A backend only decides the encoder and the subtitle burn-in method; none keeps its own timeline arithmetic.
 """
 import json, math, os, shutil, subprocess, tempfile, time
 from . import camera, manifest, plan as planmod, subtitles, verify
@@ -11,7 +11,7 @@ from .errors import ReelError
 GRADE = ("eq=contrast=1.10:saturation=1.06:brightness=0.005,"
          "colorbalance=rs=-0.06:gs=-0.01:bs=0.06:rm=0.05:bm=-0.05:rh=0.04:bh=-0.04,vignette=PI/4.6")
 TOLERANCE_S = 0.10
-SSIM_STATIC = 0.85          # 低于它视为源画面在运镜/主体大幅移动
+SSIM_STATIC = 0.85          # below this the source picture is treated as having camera movement / large subject movement
 
 
 def _ffmpeg_filters():
@@ -47,7 +47,7 @@ class NvencBackend(Backend):
     def __init__(self):
         super().__init__()
         if "h264_nvenc" not in _ffmpeg_encoders():
-            raise ReelError("BACKEND_UNAVAILABLE", "本机 ffmpeg 没有 h264_nvenc")
+            raise ReelError("BACKEND_UNAVAILABLE", "the local ffmpeg has no h264_nvenc")
 
 
 def make_backend(name):
@@ -55,13 +55,13 @@ def make_backend(name):
         return Backend()
     if name == "nvenc":
         return NvencBackend()
-    raise ReelError("BACKEND_UNAVAILABLE", f"未知 backend {name!r}（cpu / nvenc；远程 GPU 用 --where remote）")
+    raise ReelError("BACKEND_UNAVAILABLE", f"unknown backend {name!r} (cpu / nvenc; use --where remote for the remote GPU)")
 
 
 def _fesc(path):
-    """把路径作为 filter 选项值嵌入 filtergraph：先按选项值转义（\\ ' :），再按 filtergraph 转义（\\ ' [ ] , ;）。"""
+    """Embed a path as a filter option value in a filtergraph: first escape as an option value (\\ ' :), then as a filtergraph (\\ ' [ ] , ;)."""
     v = path
-    for ch in ("\\", "'", ":", " ", "\t"):     # 空白也转义：ffmpeg 会裁掉选项值首尾未转义的空白
+    for ch in ("\\", "'", ":", " ", "\t"):     # whitespace is escaped too: ffmpeg trims unescaped leading and trailing whitespace of option values
         v = v.replace(ch, "\\" + ch)
     for ch in ("\\", "'", "[", "]", ",", ";", " ", "\t"):
         v = v.replace(ch, "\\" + ch)
@@ -71,15 +71,15 @@ def _fesc(path):
 def run(cmd, what):
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
-        raise ReelError("FFMPEG_FAILED", f"{what} 失败", cmd=" ".join(cmd[:12]) + " …",
+        raise ReelError("FFMPEG_FAILED", f"{what} failed", cmd=" ".join(cmd[:12]) + " …",
                         stderr=p.stderr[-1500:])
     return p
 
 
-# ---------------- 编译 ----------------
+# ---------------- compile ----------------
 
 def compile_plan(plan, observations=None):
-    """校验 + 读素材 + 帧级时间线。不渲染，返回可检查的编译结果（也供 dry-run 使用）。"""
+    """Validate, read the media and build the frame-level timeline. Does not render; returns an inspectable compile result (also used by dry-run)."""
     plan = planmod.validate(plan, observations)
     out = plan["output"]
     W, H, fps = out["width"], out["height"], out["fps"]
@@ -95,19 +95,19 @@ def compile_plan(plan, observations=None):
             errs.append(e.to_dict()); continue
         m = metas[s["id"]]
         if m["kind"] == "audio":
-            errs.append({"code": "ASSET_KIND", "message": f"{s['id']} 用了音频文件当画面", "detail": {"path": p}})
+            errs.append({"code": "ASSET_KIND", "message": f"{s['id']} uses an audio file as picture", "detail": {"path": p}})
         elif m["kind"] == "image" and s["source_in"]:
-            errs.append({"code": "PLAN_INVALID", "message": f"{s['id']}: 图片的 source_in 必须为 0", "detail": {}})
+            errs.append({"code": "PLAN_INVALID", "message": f"{s['id']}: source_in of an image must be 0", "detail": {}})
     au = plan["audio"]
     voice = planmod.resolve(plan, au["voice"])
     for key in ("voice", "subtitles", "bgm"):
         if au.get(key) and not os.path.isfile(planmod.resolve(plan, au[key])):
-            errs.append({"code": "ASSET_NOT_FOUND", "message": f"audio.{key} 不存在",
+            errs.append({"code": "ASSET_NOT_FOUND", "message": f"audio.{key} does not exist",
                          "detail": {"path": planmod.resolve(plan, au[key])}})
     if plan["look"].get("lut") and not os.path.isfile(planmod.resolve(plan, plan["look"]["lut"])):
-        errs.append({"code": "ASSET_NOT_FOUND", "message": "look.lut 不存在", "detail": {}})
+        errs.append({"code": "ASSET_NOT_FOUND", "message": "look.lut does not exist", "detail": {}})
     if errs:
-        raise ReelError("PLAN_INVALID", f"素材检查有 {len(errs)} 处错误", errors=errs)
+        raise ReelError("PLAN_INVALID", f"media check found {len(errs)} errors", errors=errs)
 
     frames = [int(round(s["duration"] * fps)) for s in plan["shots"]]
     trans = [int(round(s["transition_out"]["duration"] * fps)) if s.get("transition_out") else 0
@@ -119,32 +119,32 @@ def compile_plan(plan, observations=None):
     if plan["duration_policy"] == "fit_last_shot" and visual_f != voice_f:
         new = frames[-1] + (voice_f - visual_f)
         if new < 2:
-            raise ReelError("DURATION_MISMATCH", "配音比画面短太多，最后一个镜头补不了",
+            raise ReelError("DURATION_MISMATCH", "the voice-over is much shorter than the picture; the last shot cannot make up the difference",
                             visual_s=visual_f / fps, voice_s=voice_s)
         adjustments.append({"shot": plan["shots"][-1]["id"], "frames_from": frames[-1], "frames_to": new})
         frames[-1] = new
         plan["shots"][-1]["duration"] = new / fps
         visual_f = voice_f
-        try:                       # 缩短后运镜/转场可能不再合法：必须重新校验，不能返回自己 validator 不接受的 plan
+        try:                       # after shortening, the camera move / transition may no longer be valid: re-validate, and never return a plan the validator itself would reject
             planmod.validate(json.loads(json.dumps(plan)), observations)
         except ReelError as e:
-            raise ReelError("DURATION_MISMATCH", "配音比画面短，补齐时缩短最后一镜会破坏它的运镜/转场；"
-                            "请缩短前面的镜头或改写最后一镜", adjustment=adjustments[-1],
+            raise ReelError("DURATION_MISMATCH", "the voice-over is shorter than the picture, and shortening the last shot to fit would break its camera move / transition; "
+                            "shorten the earlier shots or rewrite the last shot", adjustment=adjustments[-1],
                             errors=e.detail.get("errors"))
     elif abs(visual_f - voice_f) > round(TOLERANCE_S * fps):
-        raise ReelError("DURATION_MISMATCH", "画面总长与配音不一致（转场会吃掉重叠时长）",
+        raise ReelError("DURATION_MISMATCH", "total picture length differs from the voice-over (transitions eat the overlap time)",
                         visual_s=round(visual_f / fps, 3), voice_s=round(voice_s, 3),
                         transitions_s=round(sum(trans) / fps, 3),
-                        hint="加长镜头，或 duration_policy=fit_last_shot")
+                        hint="lengthen the shots, or use duration_policy=fit_last_shot")
     pads = {}
     for s, n in zip(plan["shots"], frames):
         m = metas[s["id"]]
         short = s["source_in"] + n / fps - (m.get("duration") or 0) if m["kind"] == "video" else 0
         if short > 1.5 / fps + 1e-6:
-            raise ReelError("SOURCE_TOO_SHORT", f"{s['id']}: 入点+时长超出视频长度 {short:.3f}s（会定格）",
+            raise ReelError("SOURCE_TOO_SHORT", f"{s['id']}: in-point plus duration exceeds the video length by {short:.3f}s (it would freeze)",
                             source_in=s["source_in"], need_s=round(n / fps, 3), source_s=m["duration"],
-                            hint="缩短镜头或提前入点")
-        if short > 1e-6:                   # 差 ≤1.5 帧（时长取整误差）：末帧补齐，不报错
+                            hint="shorten the shot or move the in-point earlier")
+        if short > 1e-6:                   # a difference of at most 1.5 frames (duration rounding error): pad with the last frame, no error
             pads[s["id"]] = short
     for s, n in zip(plan["shots"], frames):
         m = metas[s["id"]]
@@ -152,15 +152,15 @@ def compile_plan(plan, observations=None):
             a, b = s["source_in"], s["source_in"] + n / fps
             inside = [t for t in manifest.scene_cuts(m["path"]) if a + 0.05 < t < b - 0.05]
             if inside:
-                raise ReelError("SCENE_CUT_IN_SHOT", f"{s['id']}: 源区间 [{a:.2f}, {b:.2f}]s 内有切镜 {inside}，"
-                                "按单帧框推近会推到别的画面；把镜头拆在切点两侧", cuts=inside)
+                raise ReelError("SCENE_CUT_IN_SHOT", f"{s['id']}: source range [{a:.2f}, {b:.2f}]s contains a scene cut {inside}, "
+                                "a push-in on a single-frame box would land on a different picture; split the shot on both sides of the cut", cuts=inside)
             fixed = [x for x in s["camera"] if x["op"] == "zoom_to" and not x.get("track_boxes")]
             if fixed:
                 sim = manifest.frame_ssim(m["path"], a, b - 1 / fps)
                 if sim < SSIM_STATIC:
                     raise ReelError("SOURCE_CAMERA_MOVING",
-                                    f"{s['id']}: 源画面在这段里自己在动（首尾 SSIM={sim:.2f}<{SSIM_STATIC}），"
-                                    "单帧框会跟丢目标；在区间内多个时间点 locate 同一目标，改用 zoom_to.track",
+                                    f"{s['id']}: the source picture moves by itself in this range (first/last SSIM={sim:.2f}<{SSIM_STATIC}），"
+                                    "a single-frame box will lose the target; locate the same target at several times in the range and use zoom_to.track",
                                     ssim=round(sim, 3), source_window=[round(a, 3), round(b, 3)])
     cams = {}
     for s in plan["shots"]:
@@ -176,7 +176,7 @@ def compile_plan(plan, observations=None):
 
 
 def voice_timeline(plan):
-    """配音逐字时间：优先 audio.words（whisper 逐字，reel.py words 生成），否则按字幕句内均分。"""
+    """Per-word voice timing: audio.words is preferred (whisper per-character, produced by reel.py words), otherwise shared evenly within each subtitle sentence."""
     from . import web
     au = plan["audio"]
     if au.get("words"):
@@ -211,7 +211,7 @@ def summary(c):
             "adjustments": c["adjustments"]}
 
 
-# ---------------- 执行 ----------------
+# ---------------- execution ----------------
 
 def _segment(c, i, s, be, tmp):
     fps = c["plan"]["output"]["fps"]
@@ -232,14 +232,14 @@ def _segment(c, i, s, be, tmp):
         vf = f"{pre},{loop},{post}"
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", src, "-vf", vf]
     else:
-        # 必须是输入端 seek：输出端 -ss 会被实现成滤镜链末尾的 trim，perspective 的帧号 on 会从源第 0 帧数起，
-        # 入点越靠后运镜错位越多。转码时输入端 seek 是精确的（accurate_seek 默认开）。
+        # must be an input-side seek: an output-side -ss is implemented as a trim at the end of the filter chain, and perspective's frame counter on would count from source frame 0,
+        # so the later the in-point the more the camera move is misaligned. When transcoding, input-side seek is exact (accurate_seek is on by default).
         pad = c.get("pads", {}).get(s["id"])
         tail = f",tpad=stop_mode=clone:stop_duration={pad + 2 / fps:.4f}" if pad else ""
         vf = f"fps={fps},{pre},{post}{tail}"
         cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{s['source_in']}", "-i", src, "-vf", vf]
     cmd += ["-frames:v", str(n), "-an"] + be.seg_enc + ["-r", str(fps), out]
-    run(cmd, f"镜头 {s['id']}")
+    run(cmd, f"shot {s['id']}")
     return out
 
 
@@ -250,7 +250,7 @@ def _join(c, segs, be, tmp):
     inputs = []
     for sp in segs:
         inputs += ["-i", sp]
-    # 统一 timebase：concat 输出与 MP4 输入的 timebase 不同，混用硬切和 xfade 时 xfade 会拒绝
+    # unify the timebase: the concat output and MP4 input differ in timebase, and xfade refuses when hard cuts and xfade are mixed
     fc = [f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[n{i}]" for i in range(len(segs))]
     prev, cum = "n0", c["frames"][0]
     for i in range(1, len(segs)):
@@ -266,7 +266,7 @@ def _join(c, segs, be, tmp):
         prev = lbl
     out = os.path.join(tmp, "silent.mp4")
     run(["ffmpeg", "-y", "-v", "error"] + inputs + ["-filter_complex", ";".join(fc), "-map", f"[{prev}]"]
-        + be.seg_enc + ["-r", str(fps), out], "拼接/转场")
+        + be.seg_enc + ["-r", str(fps), out], "concat/transitions")
     return out
 
 
@@ -290,13 +290,13 @@ def execute(c, out_path, be, keep_tmp=False, log=print):
         if au.get("subtitles"):
             events = subtitles.parse(planmod.resolve(p, au["subtitles"]))
             if be.subs_mode is None:
-                raise ReelError("BACKEND_UNAVAILABLE", "没有可用的字幕烧录方式（ffmpeg 无 ass 且无 mpv）")
+                raise ReelError("BACKEND_UNAVAILABLE", "no subtitle burn-in method available (ffmpeg has no ass filter and mpv is missing)")
         vchain = []
         if look.get("grade"):
             vchain.append(GRADE)
         if look.get("lut"):
             vchain.append(f"lut3d=file={_fesc(planmod.resolve(p, look['lut']))}:interp=tetrahedral")
-        vchain.append("tpad=stop_mode=clone:stop_duration=0.5")    # 末帧补齐 ≤1 帧的量化差
+        vchain.append("tpad=stop_mode=clone:stop_duration=0.5")    # pad the last frame to cover a quantisation difference of at most 1 frame
         burn_in_ffmpeg = events is not None and be.subs_mode == "ass"
         if burn_in_ffmpeg:
             ass = subtitles.write_ass(events, os.path.join(tmp, "subs.ass"), W, H, be.font, au["keywords"])
@@ -314,7 +314,7 @@ def execute(c, out_path, be, keep_tmp=False, log=print):
         stage = out_path if (events is None or burn_in_ffmpeg) else os.path.join(tmp, "clean.mp4")
         run(["ffmpeg", "-y", "-v", "error"] + inputs + ["-filter_complex", ";".join(fc), "-map", "[v]",
              "-map", amap, "-t", dur] + be.final_enc + ["-r", str(fps), "-c:a", "aac", "-b:a", "192k",
-                                                        "-movflags", "+faststart", stage], "混音/调色")
+                                                        "-movflags", "+faststart", stage], "audio mix / colour grade")
         if events is not None and not burn_in_ffmpeg:
             srt = subtitles.write_srt(events, os.path.join(tmp, "subs.srt"), au["keywords"])
             fs = max(24, round(42 * min(W, H) / 1080))   # mpv units are per 720 px of height: the short side keeps 16:9 as readable as 9:16
@@ -326,7 +326,7 @@ def execute(c, out_path, be, keep_tmp=False, log=print):
                                 "--oacopts=b=192k", "--vf=format=yuv420p", "--no-terminal"],
                                capture_output=True, text=True)
             if r.returncode != 0 or not os.path.isfile(out_path):
-                raise ReelError("SUBTITLE_BURN_FAILED", "mpv 烧字幕失败", stderr=(r.stderr or r.stdout)[-1200:])
+                raise ReelError("SUBTITLE_BURN_FAILED", "mpv subtitle burn-in failed", stderr=(r.stderr or r.stdout)[-1200:])
         res = verify.check(out_path, expect_s=c["voice_s"], fps=fps, width=W, height=H,
                            subs_cues=subtitles.cues(events) if events is not None else None)
         res.update({"backend": be.describe(), "adjustments": c["adjustments"],
@@ -335,7 +335,7 @@ def execute(c, out_path, be, keep_tmp=False, log=print):
         return res
     finally:
         if keep_tmp or not ok:
-            log(f"[tmp] 中间文件保留在 {tmp}")
+            log(f"[tmp] intermediate files kept in {tmp}")
         else:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -343,18 +343,18 @@ def execute(c, out_path, be, keep_tmp=False, log=print):
 def render(plan, out_path, backend="cpu", observations=None, keep_tmp=False, log=print):
     c = compile_plan(plan, observations)
     be = make_backend(backend)
-    log(f"[plan] {len(c['plan']['shots'])} 镜头 · 画面 {c['visual_f'] / c['plan']['output']['fps']:.2f}s"
-        f" · 配音 {c['voice_s']:.2f}s · backend={be.name}/{be.subs_mode}")
+    log(f"[plan] {len(c['plan']['shots'])} shots | picture {c['visual_f'] / c['plan']['output']['fps']:.2f}s"
+        f" | voice {c['voice_s']:.2f}s · backend={be.name}/{be.subs_mode}")
     return execute(c, out_path, be, keep_tmp, log)
 
 
 def preview_shot(plan, shot_id, out_path, observations=None, backend="cpu"):
-    """只渲一个镜头（无音频），给决策层快速看运镜效果。"""
+    """Render a single shot (no audio) so the decision layer can quickly see the camera move."""
     c = compile_plan(plan, observations)
     be = make_backend(backend)
     idx = next((i for i, s in enumerate(c["plan"]["shots"]) if s["id"] == shot_id), None)
     if idx is None:
-        raise ReelError("SHOT_NOT_FOUND", f"没有镜头 {shot_id}")
+        raise ReelError("SHOT_NOT_FOUND", f"no shot {shot_id}")
     tmp = tempfile.mkdtemp(prefix="reel_prev_")
     try:
         seg = _segment(c, idx, c["plan"]["shots"][idx], be, tmp)
@@ -368,25 +368,25 @@ def preview_shot(plan, shot_id, out_path, observations=None, backend="cpu"):
 
 def preview_range(plan, a_s, b_s, out_path, size=None, out_fps=15, audio="mix", observations=None,
                   backend="cpu", log=print):
-    """局部低清预览：先按 plan 的目标 fps 编译全片时间线，只渲与 [a_s, b_s) 相交的镜头（整镜渲染，
-    转场两侧 handles 完整），再截出区间、降到 out_fps 取样；配音/BGM 按全片同一时间截取混音。
-    时间轴与全片一致：预览第 k 帧 = 全片时刻 fa/fps + k/out_fps。字幕不烧录。"""
+    """Local low-resolution preview: first compile the whole timeline at the plan's target fps and render only the shots that intersect [a_s, b_s) (whole shots are rendered,
+    with full handles on both sides of a transition), then cut out the range and resample to out_fps; voice/BGM are mixed from the same times as the full video.
+    The time axis matches the full video: preview frame k = full-video time fa/fps + k/out_fps. Subtitles are not burned in."""
     c = compile_plan(plan, observations)
     p = c["plan"]
     fps, W, H = p["output"]["fps"], p["output"]["width"], p["output"]["height"]
     fa = int(math.floor(a_s * fps + 1e-9))
     fb = min(int(math.ceil(b_s * fps - 1e-9)), c["visual_f"])
     if not 0 <= fa < fb:
-        raise ReelError("ARG_INVALID", f"区间 [{a_s}, {b_s}) 不在画面 [0, {c['visual_f'] / fps:.3f}) 内")
+        raise ReelError("ARG_INVALID", f"range [{a_s}, {b_s}) is not inside the picture [0, {c['visual_f'] / fps:.3f})")
     if size:
         pw, ph = size
     else:
         k = 960 / max(W, H)
         pw, ph = max(2, int(round(W * k / 2)) * 2), max(2, int(round(H * k / 2)) * 2)
     if pw % 2 or ph % 2 or abs(pw / ph - W / H) > 0.01:
-        raise ReelError("ARG_INVALID", f"--size {pw}x{ph} 必须是偶数且与输出比例 {W}x{H} 一致（运镜几何按比例求值）")
+        raise ReelError("ARG_INVALID", f"--size {pw}x{ph} must be even and match the output aspect {W}x{H} (the camera geometry is evaluated by ratio)")
     if audio not in ("mix", "voice", "none"):
-        raise ReelError("ARG_INVALID", "--audio 必须是 mix / voice / none")
+        raise ReelError("ARG_INVALID", "--audio must be mix / voice / none")
     idx = [i for i in range(len(c["frames"])) if c["starts"][i] < fb and c["starts"][i] + c["frames"][i] > fa]
     shots = [json.loads(json.dumps(p["shots"][i])) for i in idx]
     shots[-1].pop("transition_out", None)
@@ -418,13 +418,13 @@ def preview_range(plan, a_s, b_s, out_path, size=None, out_fps=15, audio="mix", 
             maps += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k"]
         run(["ffmpeg", "-y", "-v", "error"] + inputs + ["-filter_complex", ";".join(fc)] + maps
             + ["-t", f"{dur:.4f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-               "-r", str(out_fps), "-movflags", "+faststart", out_path], "区间预览")
+               "-r", str(out_fps), "-movflags", "+faststart", out_path], "range preview")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     res = verify.check(out_path, expect_s=dur, fps=out_fps, width=pw, height=ph, expect_audio=audio != "none")
     res.update({"range_f": [fa, fb], "range_s": [round(t0, 4), round(t1, 4)], "compile_fps": fps,
                 "preview_fps": out_fps, "size": [pw, ph], "audio": audio if audio != "mix" or au.get("bgm")
-                else "voice (plan 无 bgm)", "shots": [s["id"] for s in shots],
+                else "voice (plan has no bgm)", "shots": [s["id"] for s in shots],
                 "rendered_f": [off, off + sum(sub["frames"]) - sum(sub["trans"])],
                 "subtitles": "not_burned", "time_map": f"preview frame k = full-cut time {t0:.4f}s + k/{out_fps}"})
     return res

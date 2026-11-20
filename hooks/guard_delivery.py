@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash) hook：只守 `reel register` 登记过的交付目录，成片只能经 `reel deliver` 进去。
+"""PreToolUse(Bash) hook: guards only the delivery directories registered with `reel register`; a final video can enter them only through `reel deliver`.
 
-- 登记表为空 → 什么都不管。
-- 逐个片段（; && || | 换行）判断：cp/mv/rsync/ditto/install/ln 的目标、ffmpeg/melt 的输出、重定向/tee 的目标、
-  rm/touch/mkdir 等的参数落在交付目录里 → 拒绝。`reel deliver` 放行；同一条命令里 deliver 之后再 cp 坏片照样拒绝。
-- 从交付目录读（ls、shasum、ffprobe、cp 出来）放行；素材复制到项目目录放行。
-- 解析不了的写法（目标含变量、解释器/脚本、未知命令）只在命令里明文出现交付目录时拒绝，提示改走 reel deliver；
-  完全看不到交付目录的 Python/远程写入拦不住，由 Stop hook（deliver_gate.py）拦「没有回执的已完成」。
-- bypass（跳过权限确认）模式下照样生效；守卫自身出错时静默放行（不阻塞所有 Bash）。
+- If the registry is empty, it does nothing.
+- Each segment (; && || | newline) is judged on its own: the targets of cp/mv/rsync/ditto/install/ln, the outputs of ffmpeg/melt, redirect/tee targets,
+  and arguments of rm/touch/mkdir etc. that fall inside a delivery directory are refused. `reel deliver` is allowed; a cp of a bad file after deliver in the same command is still refused.
+- Reading from a delivery directory (ls, shasum, ffprobe, cp out) is allowed; copying media into the project directory is allowed.
+- Forms that cannot be parsed (a target containing variables, interpreters/scripts, unknown commands) are refused only when the delivery directory appears in plain text in the command, with a hint to use reel deliver;
+  Python/remote writes that never show the delivery directory cannot be stopped here; the Stop hook (deliver_gate.py) catches "claimed done without a receipt".
+- It is effective in bypass (permission prompts skipped) mode too; if the guard itself fails it passes silently (it must not block all Bash).
 """
 import json, os, re, shlex, sys
 
@@ -47,7 +47,7 @@ def load_roots():
 
 
 def aliases(roots):
-    """命令里可能出现的写法：realpath、登记时的写法、去掉 /private 前缀、~ 开头。用于「命令里明文提到交付目录」。"""
+    """Spellings that may appear in a command: realpath, the spelling used at registration, without the /private prefix, starting with ~. Used for "the command mentions the delivery directory in plain text"."""
     home = os.path.expanduser("~")
     out = set()
     for t in load_tasks():
@@ -92,7 +92,7 @@ class Ctx:
         self.roots = roots
         self.cwd = cwd
         self.alias = aliases(roots)
-        self.raw_mentions = False           # 每个片段在 check_segment 里重算
+        self.raw_mentions = False           # recomputed for each segment in check_segment
         self.vars = {"HOME": os.path.expanduser("~")}
 
     def assign(self, word):
@@ -101,7 +101,7 @@ class Ctx:
             self.vars[m.group(1)] = self.expand(m.group(2)) or ""
 
     def expand(self, word):
-        """展开本命令里赋过值的变量和 $HOME；命令替换 → None；环境里才有的变量按空串处理（Bash 工具每次是新 shell）。"""
+        """Expand variables assigned in this command and $HOME; a command substitution gives None; variables that exist only in the environment are treated as empty (the Bash tool starts a new shell each time)."""
         if "`" in word or "$(" in word:
             return None
         for m in VAR.finditer(word):
@@ -113,7 +113,7 @@ class Ctx:
         return VAR.sub(lambda m: self.vars.get(m.group(1) or m.group(2), ""), word)
 
     def resolve(self, word):
-        """→ 绝对路径；含命令替换或相对路径而 cwd 未知 → None。"""
+        """Returns an absolute path; None if it contains a command substitution, or is relative while the cwd is unknown."""
         word = self.expand(word)
         if word is None:
             return None
@@ -125,7 +125,7 @@ class Ctx:
         return os.path.realpath(w)
 
     def inside(self, word):
-        """True = 在交付目录里；False = 不在；None = 看不出来。"""
+        """True = inside a delivery directory; False = not; None = cannot tell."""
         p = self.resolve(word)
         if p is None:
             return None
@@ -159,7 +159,7 @@ def _target_dir_flag(args):
 
 
 def check_segment(seg, ctx):
-    """返回拒绝理由或 None。「提到交付目录」只看本片段（含 heredoc 正文切出来的行）。"""
+    """Returns the refusal reason or None. "Mentions the delivery directory" looks only at this segment (including lines cut from a heredoc body)."""
     low = _norm(" ".join(seg))
     ctx.raw_mentions = any(a in low for a in ctx.alias)
     redir_targets, argv, i = [], [], 0
@@ -181,13 +181,13 @@ def check_segment(seg, ctx):
             return f"redirect writes to {tg}"
     while argv and (ASSIGN.match(argv[0]) or argv[0] in WRAPPERS):
         if argv[0] in ("command", "type") and len(argv) > 1 and argv[1] in ("-v", "-V"):
-            return None                     # command -v 只是查找
+            return None                     # command -v is only a lookup
         if ASSIGN.match(argv[0]):
             ctx.assign(argv[0])
         argv.pop(0)
     if not argv:
         return None
-    if argv[0] == ":":                      # : "${X:=默认值}" 也是赋值
+    if argv[0] == ":":                      # : "${X:=default}" is an assignment too
         for a in argv[1:]:
             ctx.expand(a)
         return None
@@ -218,12 +218,12 @@ def check_segment(seg, ctx):
     if cmd == "xattr" and not any(a in ("-w", "-d", "-c", "-r") for a in args):
         return None
     if cmd == "rsync" and any(a == "--dry-run" or (re.match(r"^-[A-Za-z]+$", a) and "n" in a) for a in args):
-        return None                         # rsync -n / --dry-run 只预览（重定向已在上面单独查过）
+        return None                         # rsync -n / --dry-run only previews (redirects were checked separately above)
     if cmd == "tar":
         mode = next((a.lstrip("-") for a in args if a and not a.startswith("--")), "")
         if ("t" in mode or "--list" in args) and not set(mode) & set("xcru") and \
                 not any(a in ("--extract", "--create", "--append", "--update", "--get") for a in args):
-            return None                     # tar -t 只列出归档内容
+            return None                     # tar -t only lists the archive contents
     if cmd in COPY_LIKE or cmd == "mv":
         pos = _positional(args)
         dest = _target_dir_flag(args) or (pos[-1] if pos else None)
@@ -257,7 +257,7 @@ def check_segment(seg, ctx):
         if ctx.raw_mentions and any(("$(" in a or "`" in a) for a in args):
             return f"{cmd} has a command substitution and the command mentions the delivery folder; cannot confirm it is safe"
         return None
-    # 解释器、脚本、未知命令：读不出它会写哪里。命令里明文出现交付目录就拒绝。
+    # Interpreters, scripts, unknown commands: where they write cannot be read. Refuse if the delivery directory appears in plain text in the command.
     if ctx.raw_mentions or any(ctx.inside(a) for a in args):
         kind = "interpreter/script" if cmd in INTERP else "unrecognised command"
         return f"{kind} {cmd}: the command mentions the delivery folder; cannot confirm it does not write there"
@@ -287,7 +287,7 @@ def main():
         command = (data.get("tool_input") or {}).get("command") or ""
         roots = load_roots()
         why = decide(command, data.get("cwd") or os.getcwd(), roots)
-    except Exception:  # noqa: BLE001  守卫自身出错不能卡住所有 Bash
+    except Exception:  # noqa: BLE001  a failure of the guard itself must not block all Bash
         return
     if why:
         msg = (f"[reel guard] denied: {why}. Registered delivery folders ({'; '.join(roots)}) can only be written by"

@@ -1,7 +1,7 @@
-"""LLM 可调用的工具层：每个子命令 = 一个工具。stdout 只输出一个 JSON；失败 exit 1 并给结构化错误。
+"""Tool layer callable by an LLM: every subcommand is one tool. stdout carries exactly one JSON object; on failure it exits 1 with a structured error.
 
-决策流程（Claude 作为决策层）：
-  inspect → frame(看带网格的帧) → observe / locate(登记目标) → 写 plan.json（zoom_to 引用 observation_id）
+Decision flow (Claude as the decision layer):
+  inspect, frame (look at the frame with a grid), observe / locate (register the target), write plan.json (zoom_to references an observation_id)
   → validate → preview <shot> → render --where auto
 """
 import argparse, json, os, re, shutil, sys, tempfile
@@ -16,7 +16,7 @@ def _log(*a):
 def _floats(s, n=None):
     v = [float(x) for x in s.split(",") if x.strip()]
     if n and len(v) != n:
-        raise ReelError("ARG_INVALID", f"需要 {n} 个逗号分隔的数字: {s}")
+        raise ReelError("ARG_INVALID", f"needs {n} comma-separated numbers: {s}")
     return v
 
 
@@ -29,7 +29,7 @@ def _plan_and_obs(a):
     return plan, perceive.load_obs(obs_path), obs_path
 
 
-# ---------------- 工具 ----------------
+# ---------------- tools ----------------
 
 def t_inspect(a):
     return {"assets": [manifest.probe_full(p) for p in a.paths]}
@@ -66,7 +66,7 @@ def _detect_remote(frames, queries, threshold, allow_over):
                        "threshold": threshold, "frac": 1.0 if allow_over else remote.DEFAULT_VRAM_FRAC})
     p = remote.run_in_job(info["host"], job, "-m reelcore _detect " + _shq(args), gpu=True, venv=True,
                           timeout=1800, need_mib=2500, allow_over=allow_over)
-    res = _parse_json(p, "远程检测")
+    res = _parse_json(p, "remote detection")
     return res["result"], {"host": info["host"], "job": job, "gate": gate}
 
 
@@ -84,7 +84,7 @@ def _parse_json(p, what):
     try:
         res = json.loads(p.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        raise ReelError("REMOTE_FAILED", f"{what}没有返回 JSON", stderr=p.stderr[-1500:], stdout=p.stdout[-500:])
+        raise ReelError("REMOTE_FAILED", f"{what}: did not return JSON", stderr=p.stderr[-1500:], stdout=p.stdout[-500:])
     if not res.get("ok"):
         raise ReelError(res["error"]["code"], f"[remote] {res['error']['message']}", **res["error"].get("detail", {}))
     return res
@@ -119,8 +119,8 @@ def t_locate(a):
                 items.append({"asset": a.asset, "t": t, "label": d["label"], "bbox": d["bbox"], "conf": d["conf"],
                               "source": f"owlv2@{where}"})
         if not items:
-            raise ReelError("TARGET_NOT_FOUND", f"没有检出 {queries}（阈值 {a.threshold}）；可降阈值、换描述，"
-                                                "或用 frame + observe 人工登记", queries=queries)
+            raise ReelError("TARGET_NOT_FOUND", f"nothing detected for {queries} (threshold {a.threshold}); lower the threshold, rephrase, "
+                                                "or register manually with frame + observe", queries=queries)
         added = perceive.add_obs(a.obs, items)
         out = {"observations": added, "where": where, "remote": remote_info}
         if a.check_png:
@@ -132,22 +132,22 @@ def t_locate(a):
 
 
 def t_words(a):
-    """配音 → 逐字时间（whisper-cli，本机 Metal，免费）。结果写 JSON：[{t0,t1,text}]，plan 里 audio.words 引用它。"""
+    """Voice-over to per-word timing (whisper-cli, local Metal, free). The result is written as JSON: [{t0,t1,text}], referenced by audio.words in the plan."""
     import subprocess
     model = os.environ.get("REEL_WHISPER_MODEL", os.path.expanduser("~/models/whisper/ggml-large-v3-turbo.bin"))
     if not shutil.which("whisper-cli") or not os.path.isfile(model):
-        raise ReelError("BACKEND_UNAVAILABLE", "需要 whisper-cli 和模型（REEL_WHISPER_MODEL）", model=model)
+        raise ReelError("BACKEND_UNAVAILABLE", "whisper-cli and a model are required (REEL_WHISPER_MODEL)", model=model)
     td = tempfile.mkdtemp(prefix="reel_words_")
     try:
         wav = os.path.join(td, "a.wav")
         r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", a.audio, "-ar", "16000", "-ac", "1", wav],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            raise ReelError("FFMPEG_FAILED", "音频解码失败", stderr=r.stderr[-400:])
+            raise ReelError("FFMPEG_FAILED", "audio decoding failed", stderr=r.stderr[-400:])
         r = subprocess.run(["whisper-cli", "-m", model, "-f", wav, "-l", a.lang, "-ml", "1", "-osrt", "-of",
                             os.path.join(td, "w")], capture_output=True, text=True)
         if r.returncode != 0 or not os.path.isfile(os.path.join(td, "w.srt")):
-            raise ReelError("WHISPER_FAILED", "whisper 逐字转写失败", stderr=r.stderr[-600:])
+            raise ReelError("WHISPER_FAILED", "whisper per-word transcription failed", stderr=r.stderr[-600:])
         from . import subtitles
         ev = subtitles.parse(os.path.join(td, "w.srt"), allow_zero=True)
     finally:
@@ -185,7 +185,7 @@ def t_compile(a):
 
 
 def _compiled(a):
-    """plan → (compile 结果, 时间线)；revision 来自 .reel-history（无历史 = r0）。"""
+    """plan gives (compile result, timeline); the revision comes from .reel-history (no history = r0)."""
     from . import edit, timeline
     plan, obs, _ = _plan_and_obs(a)
     c = render.compile_plan(plan, obs)
@@ -217,7 +217,7 @@ def t_scrub(a):
     ov = [x for x in (a.overlays or "").split(",") if x]
     bad = [x for x in ov if x not in ("safe", "caption", "bbox")]
     if bad:
-        raise ReelError("ARG_INVALID", f"未知 overlay {bad}（safe / caption / bbox）")
+        raise ReelError("ARG_INVALID", f"unknown overlay {bad} (safe / caption / bbox)")
     return visual.scrub(c, tl, picks, a.out, a.render, ov)
 
 
@@ -227,7 +227,7 @@ def _obs_for(a):
 
 
 def t_beats(a):
-    """音乐 → 节拍/强拍/BPM（beat_this 优先，librosa 兜底），写 JSON。"""
+    """Music to beats / downbeats / BPM (beat_this first, librosa as fallback), written as JSON."""
     from . import beats
     r = beats.analyze(a.audio, a.backend)
     with open(a.out, "w", encoding="utf-8") as fh:
@@ -241,7 +241,7 @@ def t_beats(a):
 
 
 def t_snap(a):
-    """把镜头切点吸附到拍/强拍；通过 edit 写入（有 revision，可 undo）。"""
+    """Snap shot cuts to beats / downbeats; written through edit (with a revision, undoable)."""
     from . import beats, edit
     with open(a.beats, encoding="utf-8") as fh:
         info = json.load(fh)
@@ -252,14 +252,14 @@ def t_snap(a):
     ops = [{"op": "trim", "id": s0["id"], "duration": s1["duration"]}
            for s0, s1 in zip(raw["shots"], snapped["shots"]) if abs(s0["duration"] - s1["duration"]) > 1e-6]
     if not ops:
-        return {"report": rep, "note": "没有切点需要移动"}
+        return {"report": rep, "note": "no cut needs to move"}
     res = edit.edit(a.plan, ops, base=a.base, dry_run=a.dry_run, obs=obs)
     res["report"] = rep
     return res
 
 
 def t_mlt(a):
-    """读 Shotcut/MLT 工程：文字时间线 + 同一视频素材的重复使用。只读。"""
+    """Read a Shotcut/MLT project: text timeline plus repeated use of the same video media. Read-only."""
     from . import mlt
     tl = mlt.load(a.project)
     fps = tl["fps"]
@@ -286,7 +286,7 @@ def t_edit(a):
     try:
         ops = json.loads(src)
     except json.JSONDecodeError as e:
-        raise ReelError("OP_INVALID", f"--op 不是合法 JSON: {e}", committed=False)
+        raise ReelError("OP_INVALID", f"--op is not valid JSON: {e}", committed=False)
     return edit.edit(a.plan, ops, base=a.base, dry_run=a.dry_run, obs=_obs_for(a))
 
 
@@ -317,10 +317,10 @@ def t_check(a):
         r["report"] = a.report
     g = r["gate"]
     if g["status"] == "fail":
-        raise GateFailed("CHECK_FAILED", f"检查不通过：{len(g['blockers'])} 项阻断", r,
+        raise GateFailed("CHECK_FAILED", f"check failed: {len(g['blockers'])} blockers", r,
                          blockers=[b["check"] for b in g["blockers"]])
     if g["status"] == "needs_review":
-        raise GateFailed("CHECK_NEEDS_REVIEW", "有未处理的 REVIEW：逐项看过后写进 --reviews 记录", r,
+        raise GateFailed("CHECK_NEEDS_REVIEW", "unresolved REVIEW items: look at each one and record it in --reviews", r,
                          pending=g["pending_review"])
     return r
 
@@ -335,9 +335,9 @@ def t_lyrics(a):
     from . import lyrics
     if a.action == "import":
         if not (a.song and a.lyrics and a.out):
-            raise ReelError("ARG_INVALID", "lyrics import 需要 SONG --lyrics 歌词原件 --out lyrics.json")
+            raise ReelError("ARG_INVALID", "lyrics import needs SONG --lyrics LYRICS_SOURCE --out lyrics.json")
         return lyrics.import_(a.song, a.lyrics, a.out, a.srt, a.words, a.display, a.stream, a.end_fixes)
-    return lyrics.verify(a.song, None, a.lyrics)  # verify: 位置参数是 lyrics.json
+    return lyrics.verify(a.song, None, a.lyrics)  # verify: the positional argument is lyrics.json
 
 
 def t_register(a):
@@ -359,27 +359,27 @@ def t_preview(a):
         lo, _, hi = a.range.partition(":")
         size = tuple(int(x) for x in a.size.lower().split("x")) if a.size else None
         if size is not None and len(size) != 2:
-            raise ReelError("ARG_INVALID", f"--size 需要 WxH: {a.size}")
+            raise ReelError("ARG_INVALID", f"--size needs WxH: {a.size}")
         r = render.preview_range(plan, float(lo or 0), float(hi) if hi.strip() else float("inf"), a.out, size,
                                  a.fps, a.audio, obs, log=_log)
     elif a.shot:
         r = render.preview_shot(plan, a.shot, a.out, obs)
     else:
-        raise ReelError("ARG_INVALID", "需要 shot（单镜头无声预览）或 --range A:B（区间带声预览）")
+        raise ReelError("ARG_INVALID", "needs shot (silent single-shot preview) or --range A:B (range preview with sound)")
     if a.sheet:
         r["sheet"] = _sheet(a.out, a.sheet)
     return r
 
 
 def _sheet(mp4, png, n=5):
-    """首/中/末等距 n 帧拼成一张图，供目检运镜。"""
+    """n evenly spaced frames (first / middle / last) tiled into one picture for visually checking the camera move."""
     import subprocess
     raw = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
                           "stream=nb_read_frames", "-of", "csv=p=0", mp4], capture_output=True, text=True).stdout
-    m = re.search(r"\d+", raw or "")          # 有的文件会输出 "180," 这类带尾逗号的格式
+    m = re.search(r"\d+", raw or "")          # some files print a format with a trailing comma such as "180,"
     nf = int(m.group(0)) if m else 0
     if nf < 1:
-        raise ReelError("FFMPEG_FAILED", "读不到视频帧数，无法生成拼图", out=raw[-200:])
+        raise ReelError("FFMPEG_FAILED", "cannot read the video frame count, so the contact sheet cannot be made", out=raw[-200:])
     idx = sorted({round(i * (nf - 1) / (n - 1)) for i in range(n)})
     sel = "+".join(f"eq(n\\,{i})" for i in idx)
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", mp4, "-vf", f"select='{sel}',scale=270:-2,tile={len(idx)}x1",
@@ -420,13 +420,13 @@ def _render_remote(plan, obs, out, allow_over, keep):
     gate = remote.gpu_gate(info, need_mib=800, allow_over=allow_over)
     webtmp = tempfile.mkdtemp(prefix="reel_web_")
     plan = _prerender_web(plan, obs, webtmp)
-    # 素材按引用收集，重写成 job 内相对路径
+    # media is collected by reference and rewritten to job-relative paths
     files, rp, keys = {}, json.loads(json.dumps(plan)), {}
     def take(rel):
         src = os.path.realpath(P.resolve(plan, rel))
         if not os.path.isfile(src):
-            raise ReelError("ASSET_NOT_FOUND", f"素材不存在: {src}")
-        if src not in keys:                      # 同一文件只传一次、只有一个 job 路径（observation 映射依赖这点）
+            raise ReelError("ASSET_NOT_FOUND", f"media does not exist: {src}")
+        if src not in keys:                      # each file is uploaded once and has a single job path (the observation mapping depends on this)
             keys[src] = f"a/{len(keys):03d}_{os.path.basename(src)}"
             files[keys[src]] = src
         return keys[src]
@@ -444,7 +444,7 @@ def _render_remote(plan, obs, out, allow_over, keep):
         with open(pj, "w", encoding="utf-8") as fh:
             json.dump(rp, fh, ensure_ascii=False)
         oj = os.path.join(td, "observations.json")
-        # observation 的 asset 字段按新路径改写，校验仍能对上
+        # the asset field of observations is rewritten to the new paths so validation still matches
         amap = {s0["asset"]: s1["asset"] for s0, s1 in zip(plan["shots"], rp["shots"])}
         with open(oj, "w", encoding="utf-8") as fh:
             json.dump([{**o, "asset": amap.get(o.get("asset"), o.get("asset"))} for o in obs], fh, ensure_ascii=False)
@@ -457,12 +457,12 @@ def _render_remote(plan, obs, out, allow_over, keep):
                               need_mib=800, allow_over=allow_over)
         for ln in p.stderr.splitlines():
             _log("  [remote] " + ln)
-        res = _parse_json(p, "远程渲染")
+        res = _parse_json(p, "remote render")
         remote.fetch(info["host"], f"{job}/out.mp4", out)
     finally:
         shutil.rmtree(td, ignore_errors=True)
         shutil.rmtree(webtmp, ignore_errors=True)
-    # 不信远程的 ok：拉回后在本机重新验收
+    # do not trust the remote ok: re-run acceptance locally after pulling back
     o = plan["output"]
     cues = None
     if plan["audio"].get("subtitles"):
@@ -477,7 +477,7 @@ def _render_remote(plan, obs, out, allow_over, keep):
 
 def t_render(a):
     plan, obs, _ = _plan_and_obs(a)
-    plan = P.validate(plan, obs)                                 # 规范化（补默认值），本地/远程两条路径用同一份
+    plan = P.validate(plan, obs)                                 # normalise (fill defaults); the local and remote paths use the same one
     render.compile_plan(json.loads(json.dumps(plan)), obs)       # compile locally first: errors surface before any remote work
     where = a.where
     note = None
@@ -502,7 +502,7 @@ def t_render(a):
     if a.sheet:
         r["sheet"] = _sheet(a.out, a.sheet, 6)
     if not r["ok"]:
-        raise ReelError("ACCEPTANCE_FAILED", "成片验收未通过", **r)
+        raise ReelError("ACCEPTANCE_FAILED", "final-video acceptance failed", **r)
     return r
 
 
@@ -526,7 +526,7 @@ def t__render(a):
     r = render.execute(c, a.out, be, a.keep_tmp, log=_log)
     r["checks_expect_s"] = c["voice_s"]
     if not r["ok"]:
-        raise ReelError("ACCEPTANCE_FAILED", "远程成片验收未通过", **r)
+        raise ReelError("ACCEPTANCE_FAILED", "remote final-video acceptance failed", **r)
     return r
 
 
@@ -536,124 +536,124 @@ def t__detect(a):
                                  max_vram_frac=spec.get("frac", 0.8))
 
 
-# ---------------- 入口 ----------------
+# ---------------- entry point ----------------
 
 def build_parser():
     ap = argparse.ArgumentParser(prog="reel", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
 
-    x = sp.add_parser("inspect", help="素材清单（尺寸/时长/旋转/类型/视频切镜点）"); x.add_argument("paths", nargs="+")
+    x = sp.add_parser("inspect", help="media inventory (size / duration / rotation / kind / video scene cuts)"); x.add_argument("paths", nargs="+")
     x.set_defaults(fn=t_inspect)
-    x = sp.add_parser("frame", help="抽帧+坐标网格，给 LLM 读 bbox")
+    x = sp.add_parser("frame", help="frame extraction + coordinate grid, for the LLM to read a bbox")
     x.add_argument("asset"); x.add_argument("--t", type=float, default=0.0); x.add_argument("--out", required=True)
-    x.add_argument("--obs", help="同时把已有 observation 画上去"); x.set_defaults(fn=t_frame)
-    x = sp.add_parser("observe", help="登记 LLM 看图得到的 bbox")
+    x.add_argument("--obs", help="also draw the existing observations"); x.set_defaults(fn=t_frame)
+    x = sp.add_parser("observe", help="register a bbox the LLM obtained by looking at the picture")
     x.add_argument("--obs", required=True); x.add_argument("--src", default="."); x.add_argument("--asset", required=True)
-    x.add_argument("--bbox", required=True, help="x0,y0,x1,y1 归一化"); x.add_argument("--label", required=True)
+    x.add_argument("--bbox", required=True, help="x0,y0,x1,y1 normalised"); x.add_argument("--label", required=True)
     x.add_argument("--t", type=float, default=0.0); x.set_defaults(fn=t_observe)
-    x = sp.add_parser("locate", help="OWLv2 按文字找目标（本机有 torch 则本机，否则 REEL_REMOTE 远程主机）")
+    x = sp.add_parser("locate", help="OWLv2 finds targets by text (local if torch is available, otherwise the REEL_REMOTE host)")
     x.add_argument("--obs", required=True); x.add_argument("--src", default="."); x.add_argument("--asset", required=True)
-    x.add_argument("--query", required=True, help="逗号分隔，英文描述效果最好")
-    x.add_argument("--t", default="", help="逗号分隔的时间点（视频）"); x.add_argument("--threshold", type=float, default=0.15)
+    x.add_argument("--query", required=True, help="comma-separated; English descriptions work best")
+    x.add_argument("--t", default="", help="comma-separated times (video)"); x.add_argument("--threshold", type=float, default=0.15)
     x.add_argument("--where", choices=["auto", "local", "remote"], default="auto")
-    x.add_argument("--allow-over-80", action="store_true", help="已告知用户并获同意后才可用")
-    x.add_argument("--check-png", help="把检出框画回帧上供核对"); x.set_defaults(fn=t_locate)
-    x = sp.add_parser("words", help="配音 → 逐字时间 JSON（whisper，本机）；网页高亮跟随语速用")
-    x.add_argument("audio"); x.add_argument("--out", required=True); x.add_argument("--lang", default="zh")
+    x.add_argument("--allow-over-80", action="store_true", help="only after telling the user and getting consent")
+    x.add_argument("--check-png", help="draw the detected boxes back onto the frame for checking"); x.set_defaults(fn=t_locate)
+    x = sp.add_parser("words", help="voice-over to per-word timing JSON (whisper, local); used for web highlights that follow the speaking pace")
+    x.add_argument("audio"); x.add_argument("--out", required=True); x.add_argument("--lang", default="en", help="whisper / pinyin language: en (default) or zh")
     x.set_defaults(fn=t_words)
-    x = sp.add_parser("voice", help="声音试听的 agent 签法：whisper 转写样本，和试听文本比错误率（中文按拼音），过了写进 brief.voice.approved")
+    x = sp.add_parser("voice", help="agent sign-off of a voice audition: whisper transcribes the sample, the error rate against the audition text is computed (Chinese by pinyin), and a pass is written to brief.voice.approved")
     x.add_argument("action", choices=["check"]); x.add_argument("sample"); x.add_argument("--script", required=True,
-                   help="试听样本念的原文（至少 20 字）"); x.add_argument("--voice-id", dest="voice_id")
-    x.add_argument("--brief", help="通过后把 voice.approved（by=claude + stt 证据）写进这个 brief")
-    x.add_argument("--lang", default="zh"); x.set_defaults(fn=t_voice)
-    x = sp.add_parser("from-legacy", help="旧文本 plan → plan.json")
+                   help="the original text the audition sample reads (at least 20 characters)"); x.add_argument("--voice-id", dest="voice_id")
+    x.add_argument("--brief", help="after a pass, write voice.approved (by=claude + STT evidence) into this brief")
+    x.add_argument("--lang", default="en", help="whisper / pinyin language: en (default) or zh"); x.set_defaults(fn=t_voice)
+    x = sp.add_parser("from-legacy", help="legacy text plan to plan.json")
     x.add_argument("txt"); x.add_argument("--src", required=True); x.add_argument("--voice", required=True)
     x.add_argument("--subs"); x.add_argument("--xfade", type=float, default=0.0); x.add_argument("--bgm")
     x.add_argument("--grade", action="store_true"); x.add_argument("--lut"); x.add_argument("--keywords")
     x.add_argument("--size", default="1080x1920x60")
     x.add_argument("--policy", choices=P.POLICIES, default="fit_last_shot"); x.add_argument("--out", required=True)
     x.set_defaults(fn=t_from_legacy)
-    for name, fn, help_ in [("validate", t_validate, "只校验 plan"), ("compile", t_compile, "校验+帧级时间线摘要（不渲染）")]:
+    for name, fn, help_ in [("validate", t_validate, "validate the plan only"), ("compile", t_compile, "validate + frame-level timeline summary (no rendering)")]:
         x = sp.add_parser(name, help=help_); x.add_argument("plan"); x.add_argument("--obs"); x.set_defaults(fn=fn)
-    x = sp.add_parser("preview", help="只渲一个镜头（无声）看运镜；或 --range 区间带声低清预览")
+    x = sp.add_parser("preview", help="render one shot (silent) to see the camera move; or --range for a low-resolution preview of a range with sound")
     x.add_argument("plan"); x.add_argument("shot", nargs="?"); x.add_argument("--out", required=True)
-    x.add_argument("--obs"); x.add_argument("--range", help="A:B 秒：区间预览（时间轴与全片一致）")
-    x.add_argument("--size", help="区间预览尺寸 WxH（默认长边 960）"); x.add_argument("--fps", type=int, default=15)
+    x.add_argument("--obs"); x.add_argument("--range", help="A:B seconds: range preview (the time axis matches the full video)")
+    x.add_argument("--size", help="range preview size WxH (default long side 960)"); x.add_argument("--fps", type=int, default=15)
     x.add_argument("--audio", choices=["mix", "voice", "none"], default="mix")
-    x.add_argument("--sheet", help="输出等距抽帧拼图 png"); x.set_defaults(fn=t_preview)
-    x = sp.add_parser("timeline", help="编译后的多轨时间线（V1/C1/A1/BGM，半开帧区间）；--png 出多轨图")
-    x.add_argument("plan"); x.add_argument("--obs"); x.add_argument("--range", help="A:B 秒")
+    x.add_argument("--sheet", help="write an evenly spaced contact-sheet png"); x.set_defaults(fn=t_preview)
+    x = sp.add_parser("timeline", help="compiled multi-track timeline (V1/C1/A1/BGM, half-open frame ranges); --png writes a multi-track picture")
+    x.add_argument("plan"); x.add_argument("--obs"); x.add_argument("--range", help="A:B seconds")
     x.add_argument("--format", choices=["json", "text"], default="json")
     x.add_argument("--detail", choices=["summary", "events", "words"], default="events")
-    x.add_argument("--png", help="输出多轨 PNG（同名 .json sidecar）"); x.add_argument("--width", type=int, default=1600)
-    x.add_argument("--render", help="缩略图取自这个成片（否则取素材首帧）")
-    x.add_argument("--beats", help="reel beats 输出的 JSON：多轨图加节拍轨并标出每个切点离拍多少 ms")
-    x.add_argument("--beat-offset", type=float, default=0.0, help="音乐在时间线上的起点（秒）"); x.set_defaults(fn=t_timeline)
-    x = sp.add_parser("scrub", help="按时间点/区间/切点抽帧：干净帧 + 标注帧 + index.json")
-    x.add_argument("plan"); x.add_argument("--obs"); x.add_argument("--at", help="逗号分隔的秒数")
-    x.add_argument("--range", help="A:B 秒"); x.add_argument("--samples", type=int, default=6)
-    x.add_argument("--cuts", action="store_true", help="每个切点取前一帧/切点帧/后一帧（转场另取中点、终点）")
-    x.add_argument("--render", help="从成片取帧（否则按编译取景从素材合成）")
+    x.add_argument("--png", help="write a multi-track PNG (with a .json sidecar of the same name)"); x.add_argument("--width", type=int, default=1600)
+    x.add_argument("--render", help="thumbnails come from this video (otherwise the first frame of the media)")
+    x.add_argument("--beats", help="JSON output of reel beats: the multi-track picture gets a beat track and shows how many ms each cut is from a beat")
+    x.add_argument("--beat-offset", type=float, default=0.0, help="where the music starts on the timeline (seconds)"); x.set_defaults(fn=t_timeline)
+    x = sp.add_parser("scrub", help="extract frames by time / range / cut: clean frames + annotated frames + index.json")
+    x.add_argument("plan"); x.add_argument("--obs"); x.add_argument("--at", help="comma-separated seconds")
+    x.add_argument("--range", help="A:B seconds"); x.add_argument("--samples", type=int, default=6)
+    x.add_argument("--cuts", action="store_true", help="for each cut take the previous frame / the cut frame / the next frame (transitions also get the midpoint and end)")
+    x.add_argument("--render", help="take frames from the video (otherwise compose them from the media using the compiled framing)")
     x.add_argument("--overlays", default="", help="safe,caption,bbox"); x.add_argument("--out", required=True)
     x.set_defaults(fn=t_scrub)
-    x = sp.add_parser("beats", help="音乐节拍分析：拍/强拍/BPM（卡点用）")
+    x = sp.add_parser("beats", help="music beat analysis: beats / downbeats / BPM (for cutting on beats)")
     x.add_argument("audio"); x.add_argument("--out", required=True)
     x.add_argument("--backend", choices=["auto", "beat_this", "librosa"], default="auto"); x.set_defaults(fn=t_beats)
-    x = sp.add_parser("snap", help="把镜头切点吸附到拍/强拍（经 edit 写入，可 undo）")
+    x = sp.add_parser("snap", help="snap shot cuts to beats / downbeats (written through edit, undoable)")
     x.add_argument("plan"); x.add_argument("--beats", required=True)
     x.add_argument("--mode", default="downbeat", help="beat / downbeat / every:N / half")
-    x.add_argument("--tolerance", type=float, default=0.30, help="切点最多移动多少秒")
-    x.add_argument("--min-gap", type=float, default=0.35, help="最短镜头秒数")
-    x.add_argument("--offset", type=float, default=0.0, help="音乐在时间线上的起点（秒）")
+    x.add_argument("--tolerance", type=float, default=0.30, help="maximum number of seconds a cut may move")
+    x.add_argument("--min-gap", type=float, default=0.35, help="minimum shot length in seconds")
+    x.add_argument("--offset", type=float, default=0.0, help="where the music starts on the timeline (seconds)")
     x.add_argument("--obs"); x.add_argument("--base"); x.add_argument("--dry-run", action="store_true")
     x.set_defaults(fn=t_snap)
-    x = sp.add_parser("mlt", help="读 Shotcut/MLT 工程文件：文字时间线（轨道/片段/源入出点/滤镜）与重复用料检查")
+    x = sp.add_parser("mlt", help="read a Shotcut/MLT project file: text timeline (tracks / clips / source in-out points / filters) and a repeated-footage check")
     x.add_argument("project"); x.add_argument("--format", choices=["text", "json"], default="text")
-    x.add_argument("--range", help="A:B 秒"); x.add_argument("--video-only", action="store_true")
-    x.add_argument("--dupes", action="store_true", help="同一视频素材源区间重叠 ≥ --min-overlap 秒即报告")
+    x.add_argument("--range", help="A:B seconds"); x.add_argument("--video-only", action="store_true")
+    x.add_argument("--dupes", action="store_true", help="report when source ranges of the same video media overlap by at least --min-overlap seconds")
     x.add_argument("--min-overlap", type=float, default=0.3); x.set_defaults(fn=t_mlt)
-    x = sp.add_parser("edit", help="小粒度编辑（trim/move/insert/replace/set-transition/set-camera），校验+编译通过才原子写入")
-    x.add_argument("plan"); x.add_argument("--op", required=True, help="操作 JSON（对象或数组=原子批量），或 @文件")
-    x.add_argument("--base", help="期望的当前 revision；不一致 → REV_CONFLICT")
+    x = sp.add_parser("edit", help="fine-grained edits (trim/move/insert/replace/set-transition/set-camera); written atomically only after validation + compile pass")
+    x.add_argument("plan"); x.add_argument("--op", required=True, help="operation JSON (an object, or an array for an atomic batch), or @file")
+    x.add_argument("--base", help="expected current revision; a mismatch gives REV_CONFLICT")
     x.add_argument("--dry-run", action="store_true"); x.add_argument("--obs"); x.set_defaults(fn=t_edit)
-    x = sp.add_parser("undo", help="恢复到某个 revision（提交一个新 revision，历史不删）")
+    x = sp.add_parser("undo", help="restore a revision (commits a new revision; history is not deleted)")
     x.add_argument("plan"); x.add_argument("--to", required=True); x.add_argument("--base")
     x.add_argument("--dry-run", action="store_true"); x.add_argument("--obs"); x.set_defaults(fn=t_undo)
-    x = sp.add_parser("history", help="revision 历史"); x.add_argument("plan"); x.set_defaults(fn=t_history)
+    x = sp.add_parser("history", help="revision history"); x.add_argument("plan"); x.set_defaults(fn=t_history)
     gate_args = lambda x: (x.add_argument("--plan"), x.add_argument("--obs"),
-                           x.add_argument("--profile", help="内置 profile 名（default / vertical-strict）或项目 profile JSON 路径"),
-                           x.add_argument("--reviews", help="审片记录 JSON（逐项处理 needs_review；绑定成片 sha256）"),
-                           x.add_argument("--subs", action="append", default=[], help="另外要扫描的字幕文件（可重复）"),
-                           x.add_argument("--text", action="append", default=[], help="另外要扫描的文本文件（可重复）"),
-                           x.add_argument("--contract", help="MV 验收契约 reel.contract.v1（不依赖 plan；必查项 profile 去不掉）"))
-    x = sp.add_parser("check", help="交付闸门检查：技术检测 + 文本禁用词 + 审片记录；不放行时 ok:false、退出码 1")
-    x.add_argument("video"); gate_args(x); x.add_argument("--brief", help="brief.json（同时扫描其中文字）")
-    x.add_argument("--report", help="报告另存为 JSON"); x.set_defaults(fn=t_check)
-    x = sp.add_parser("deliver", help="受控交付：重新检查 → 成片/待审样片 → 复制并校验 hash → 写回执")
+                           x.add_argument("--profile", help="built-in profile name (default / vertical-strict) or a project profile JSON path"),
+                           x.add_argument("--reviews", help="review-records JSON (handles needs_review item by item; bound to the video sha256)"),
+                           x.add_argument("--subs", action="append", default=[], help="additional subtitle file to scan (repeatable)"),
+                           x.add_argument("--text", action="append", default=[], help="additional text file to scan (repeatable)"),
+                           x.add_argument("--contract", help="MV acceptance contract reel.contract.v1 (independent of the plan; its required checks cannot be removed by a profile)"))
+    x = sp.add_parser("check", help="delivery-gate check: technical detection + banned text + review records; when it does not pass: ok:false and exit code 1")
+    x.add_argument("video"); gate_args(x); x.add_argument("--brief", help="brief.json (its text is scanned too)")
+    x.add_argument("--report", help="save the report as JSON"); x.set_defaults(fn=t_check)
+    x = sp.add_parser("deliver", help="controlled delivery: re-check, final or sample pending review, copy and verify the hash, write a receipt")
     x.add_argument("video"); x.add_argument("--brief", required=True); x.add_argument("--version", required=True)
-    gate_args(x); x.add_argument("--sample", action="store_true", help="登记为待审样片（文件名带 sample-pending-review）")
+    gate_args(x); x.add_argument("--sample", action="store_true", help="register as a sample pending review (the file name carries sample-pending-review)")
     x.set_defaults(fn=t_deliver)
-    x = sp.add_parser("lyrics", help="歌词时间源：import（内嵌歌词流/外部 srt → 校验 → lyrics.json）/ verify")
+    x = sp.add_parser("lyrics", help="lyrics timing source: import (embedded lyrics stream / external srt, validated, to lyrics.json) / verify")
     x.add_argument("action", choices=["import", "verify"])
-    x.add_argument("song", help="import：歌曲文件；verify：lyrics.json")
-    x.add_argument("--lyrics", help="歌词原件（.md 取 ## Lyrics 一节，或纯文本）")
-    x.add_argument("--out"); x.add_argument("--srt", help="外部逐行时间轴（歌曲没有内嵌歌词流时）")
-    x.add_argument("--words", help="whisper 逐字结果（reel words 输出），只做交叉校验")
-    x.add_argument("--display", choices=["sung", "lyrics"], default="sung", help="唱的和原件不同时，画面显示哪个（默认唱的）")
-    x.add_argument("--stream", type=int, default=0, help="第几个内嵌字幕流")
-    x.add_argument("--end-fixes", dest="end_fixes", help="行尾更正 JSON [{cue, text, t1, evidence}]：歌词流行尾跨过器乐时用，只许提前、必须写证据")
+    x.add_argument("song", help="import: the song file; verify: lyrics.json")
+    x.add_argument("--lyrics", help="lyrics source (for .md the ## Lyrics section is used, or plain text)")
+    x.add_argument("--out"); x.add_argument("--srt", help="external per-line timeline (when the song has no embedded lyrics stream)")
+    x.add_argument("--words", help="whisper per-word result (output of reel words), used only for cross-checking")
+    x.add_argument("--display", choices=["sung", "lyrics"], default="sung", help="which one the picture shows when the sung text differs from the source (default: the sung one)")
+    x.add_argument("--stream", type=int, default=0, help="which embedded subtitle stream")
+    x.add_argument("--end-fixes", dest="end_fixes", help="line-end correction JSON [{cue, text, t1, evidence}]: for when a lyrics-stream line end runs over an instrumental; it may only move earlier and must give evidence")
     x.set_defaults(fn=t_lyrics)
-    x = sp.add_parser("register", help="登记任务：校验 brief，把交付目录交给 Bash guard 守")
+    x = sp.add_parser("register", help="register a task: validate the brief and hand the delivery directory to the Bash guard")
     x.add_argument("brief"); x.add_argument("--remove", action="store_true"); x.set_defaults(fn=t_register)
-    x = sp.add_parser("receipt", help="核对交付回执：交付文件还在、hash 没变")
+    x = sp.add_parser("receipt", help="check a delivery receipt: the delivered file exists and its hash is unchanged")
     x.add_argument("receipt"); x.set_defaults(fn=t_receipt)
-    x = sp.add_parser("render", help="出成片并验收")
+    x = sp.add_parser("render", help="produce the final video and accept it")
     x.add_argument("plan"); x.add_argument("--out", required=True); x.add_argument("--obs")
     x.add_argument("--where", choices=["auto", "local", "remote"], default="auto")
-    x.add_argument("--allow-over-80", action="store_true", help="已告知用户并获同意后才可用")
-    x.add_argument("--keep-tmp", action="store_true"); x.add_argument("--sheet", help="成片抽帧拼图 png")
+    x.add_argument("--allow-over-80", action="store_true", help="only after telling the user and getting consent")
+    x.add_argument("--keep-tmp", action="store_true"); x.add_argument("--sheet", help="contact-sheet png of the final video")
     x.set_defaults(fn=t_render)
-    x = sp.add_parser("remote", help="远程 GPU 主机（REEL_REMOTE）：probe / setup-vision")
+    x = sp.add_parser("remote", help="remote GPU host (REEL_REMOTE)：probe / setup-vision")
     x.add_argument("action", choices=["probe", "setup-vision"]); x.set_defaults(fn=t_remote)
     x = sp.add_parser("_render"); x.add_argument("plan"); x.add_argument("--out", required=True)
     x.add_argument("--backend", default="nvenc"); x.add_argument("--keep-tmp", action="store_true")
@@ -674,7 +674,7 @@ def main(argv=None):
             out["result"] = e.result
         print(json.dumps(out, ensure_ascii=False, default=str))
         return 1
-    except Exception as e:  # noqa: BLE001  未预期的异常也要给调用方一个 JSON，而不是半截 traceback
+    except Exception as e:  # noqa: BLE001  an unexpected exception must also give the caller JSON rather than a half traceback
         import traceback
         print(json.dumps({"ok": False, "error": {"code": "INTERNAL_ERROR", "message": f"{type(e).__name__}: {e}",
                                                  "detail": {"traceback": traceback.format_exc()[-1500:]}}},

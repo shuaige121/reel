@@ -44,7 +44,7 @@ def _ssh(host, script, timeout=120, check=True):
     p = subprocess.run(["ssh"] + SSH_OPTS + [host, "bash -s"], input=script, capture_output=True, text=True,
                        timeout=timeout)
     if check and p.returncode != 0:
-        raise ReelError("REMOTE_FAILED", f"{host} 执行失败 (exit {p.returncode})", stderr=p.stderr[-1500:],
+        raise ReelError("REMOTE_FAILED", f"{host} failed (exit {p.returncode})", stderr=p.stderr[-1500:],
                         stdout=p.stdout[-1500:])
     return p
 
@@ -76,10 +76,10 @@ def probe(host=None):
 
 
 def gpu_gate(info, need_mib, allow_over=False, frac=DEFAULT_VRAM_FRAC):
-    """开跑前检查：已用 + 本任务预计 ≤ 80%。超过则要求先告知用户；有人在用（利用率高）也不抢。"""
+    """Pre-run check: used plus this job's estimate must be at most 80%. Above that, tell the user first; if someone is using the GPU (high utilisation) do not take it."""
     g = info.get("gpu")
     if not g:
-        raise ReelError("BACKEND_UNAVAILABLE", "远程没有可见的 GPU", host=info.get("host"))
+        raise ReelError("BACKEND_UNAVAILABLE", "no GPU visible on the remote", host=info.get("host"))
     after = g["used_mib"] + need_mib
     cap = g["total_mib"] * frac
     if g["util_pct"] >= 50:
@@ -95,17 +95,17 @@ def _rsync(args, timeout=1800):
     p = subprocess.run(["rsync", "-a", "--partial", "-e", "ssh " + " ".join(SSH_OPTS)] + args,
                        capture_output=True, text=True, timeout=timeout)
     if p.returncode != 0:
-        raise ReelError("REMOTE_SYNC_FAILED", "rsync 失败", stderr=p.stderr[-800:], args=args[-2:])
+        raise ReelError("REMOTE_SYNC_FAILED", "rsync failed", stderr=p.stderr[-800:], args=args[-2:])
 
 
 def code_files():
-    """reelcore 源码随每个 job 一起上传（job/code/reelcore），并发任务之间不会互相覆盖代码。"""
+    """The reelcore source is uploaded with every job (job/code/reelcore), so concurrent jobs never overwrite each other's code."""
     root = os.path.join(PKG_DIR, "reelcore")
     return {f"code/reelcore/{n}": os.path.join(root, n) for n in sorted(os.listdir(root)) if n.endswith(".py")}
 
 
 def new_job(host, files):
-    """files: {远程相对路径: 本地路径}。本地先用符号链接摆好目录结构，再一次 rsync -L 推过去。返回远程 job 目录（相对 home）。"""
+    """files: {remote relative path: local path}. The directory layout is first built locally with symlinks, then pushed with one rsync -L. Returns the remote job directory (relative to home)."""
     job = f"{REMOTE_ROOT}/jobs/{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     stage = tempfile.mkdtemp(prefix="reel_stage_")
     try:
@@ -122,7 +122,7 @@ def new_job(host, files):
 
 def run_in_job(host, job, pycmd, gpu=True, venv=False, timeout=3600, need_mib=0, allow_over=False,
                frac=DEFAULT_VRAM_FRAC):
-    """在 job 目录下执行 python 命令。gpu=True：持远程锁（同一时间只一个 reel GPU 任务），拿到锁后再查一次显存。"""
+    """Run a python command in the job directory. gpu=True: hold the remote lock (only one reel GPU job at a time) and check VRAM again after taking the lock."""
     py = f"{VENV}/bin/python" if venv else "python3"
     inner = f"cd ~/{job} && PYTHONPATH=~/{job}/code HF_HUB_DISABLE_XET=1 {py} {pycmd}"
     if gpu:
@@ -139,9 +139,9 @@ def run_in_job(host, job, pycmd, gpu=True, venv=False, timeout=3600, need_mib=0,
     if p.returncode == 75:
         raise ReelError("GPU_BUSY", "remote GPU lock not acquired after 10 minutes (another reel GPU job is running)")
     if p.returncode == 77:
-        raise ReelError("GPU_BUSY", "拿到锁后复查：GPU 利用率高，可能有人在用，先告诉用户", stderr=p.stderr[-200:])
+        raise ReelError("GPU_BUSY", "re-check after taking the lock: GPU utilisation is high, someone may be using it; tell the user first", stderr=p.stderr[-200:])
     if p.returncode == 76:
-        raise ReelError("NEED_USER_APPROVAL", "拿到锁后复查：显存将超过上限，需先告诉用户", stderr=p.stderr[-200:],
+        raise ReelError("NEED_USER_APPROVAL", "re-check after taking the lock: VRAM would exceed the limit; tell the user first", stderr=p.stderr[-200:],
                         need_mib=need_mib)
     return p
 

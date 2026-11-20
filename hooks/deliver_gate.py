@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Stop hook：本轮做了视频产出（或会话在登记过的 reel 项目里），回复却声称完成/交付，又拿不出对应的成片回执 → 拦。
+"""Stop hook: if this turn produced video (or the session is inside a registered reel project) and the reply claims it is finished / delivered but no matching final receipt can be shown, it blocks.
 
-- 「视频产出」：命令位置上的 ffmpeg / melt / reel render|preview / build_*.py 一类脚本，命令或输出里有视频文件，
-  不在临时/测试目录；或本轮调了 reel deliver / register；或会话 cwd 在登记任务的项目目录里。
-- 「声称完成」逐句判断：一句话里有完成措辞、谈的是片子（成片/视频/样片/交付/mp4/vN），且这句和下一句都没有
-  如实状态（待审样片/未完成/待试听/未交付…）。只说测试/代码/文档完成的句子不算。全文写「本轮无视频交付」→ 不算。
-- 认哪些回执：status=final、交付文件仍在且 sha256 没变，并且
-  * 本轮有产出：回执路径出现在本轮命令输出里（即本轮自己 deliver 的），且晚于本轮最后一次产出命令；
-  * 只是在登记项目里：该项目的回执（不限时间，用于回答「成片在哪」）。
-  声称里点名的版本号（vN）都要有对应的 final 回执。
-- 同一轮最多拦 MAX_BLOCKS 次（防 hook 误判导致死循环），放行时记 stopgate.log；出错静默放行。
-它是措辞与凭据检查，不证明片子好；回执本身由 reel deliver 的检查保证。
+- "Video output": a producer such as ffmpeg / melt / reel render|preview / build_*.py in command position, with a video file in the command or its output,
+  not in a temp/test directory; or this turn called reel deliver / register; or the session cwd is inside the project directory of a registered task.
+- "Claims done" is judged sentence by sentence: a sentence with completion wording that is about the video (final / video / sample / delivery / mp4 / vN), where neither this sentence nor the next has
+an honest status (sample pending review / not finished / awaiting audition / not delivered ...). Sentences that only say tests / code / docs are done do not count. If the text says "no video delivered this turn", nothing counts. The patterns recognise both Chinese and English wording.
+- Which receipts count: status=final, the delivered file still exists with an unchanged sha256, and
+  * if this turn produced output: the receipt path appears in this turn's command output (i.e. this turn delivered it itself) and is later than the last producing command of this turn;
+  * if only inside a registered project: that project's receipts (any time, to answer "where is the video").
+  Every version number (vN) named in the claim needs a matching final receipt.
+- At most MAX_BLOCKS blocks per turn (to avoid an endless loop from a hook misjudgement); passes are logged in stopgate.log; on error it passes silently.
+It is a wording and voucher check and does not prove the video is good; the receipt itself is guaranteed by the checks in reel deliver.
 """
 import datetime, hashlib, json, os, re, shlex, sys
 
 STATE = os.environ.get("REEL_STATE_DIR") or os.path.expanduser("~/.local/state/reel")
 MAX_BLOCKS = 5
 VIDEO_EXT = re.compile(r"\.(mp4|mov|m4v|webm|mkv)\b", re.I)
-# 只认命令位置上的产出程序（片段开头），`which ffmpeg`、grep 里出现的词不算
+# only producer programs in command position (segment start) count; words in `which ffmpeg` or grep do not
 PROD = re.compile(r"^(\S*/)?(ffmpeg|melt|remotion|hyperframes)\b|^(\S*/)?reel(\.py)?\s+(render|preview)\b"
                   r"|^(\S*/)?python3?\s+(-\S+\s+)*\S*(build|render|make|export|compose|cut|edit|video|reel|clip|montage)"
                   r"\w*\.py\b|^(\S*/)?python3?\s+\S*reel\.py\s+(render|preview)\b|^npx\s+(remotion|hyperframes)\b", re.I)
@@ -57,7 +57,7 @@ def claim_sentences(msg):
         if not CLAIM.search(x) or not DELIV.search(x):
             continue
         if DEV.search(x) and not HARD_DELIV.search(x):
-            continue                        # 「测试都完成了」「代码改好了」不是交付声明
+            continue                        # "all tests are done" / "the code is fixed" is not a delivery claim
         if HONEST.search(x) or (i + 1 < len(ss) and HONEST.search(ss[i + 1])):
             continue
         out.append(x)
@@ -138,7 +138,7 @@ def analyse(turn):
 
 
 def _segments(cmd):
-    """按引号感知地切成简单命令（引号里的换行/分号不切）；解析不了时退回按符号粗切。"""
+    """Split into simple commands in a quote-aware way (newlines/semicolons inside quotes are not split); falls back to a rough split on symbols when parsing fails."""
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&\n")
         lex.whitespace = " \t\r"
@@ -159,7 +159,7 @@ def _segments(cmd):
 
 
 def video_work(cmds, results):
-    """→ (理由, 本轮最后一次产出命令的时间)。heredoc 正文（改文档/测试的 python - <<EOF）不算命令。"""
+    """Returns (reason, time of this turn's last producing command). A heredoc body (python - <<EOF editing docs/tests) does not count as a command."""
     why, last = None, None
     for tid, full, ts in cmds:
         cmd = full.split("<<", 1)[0]
@@ -201,8 +201,8 @@ def _sha(path):
 
 
 def receipts(turn_text, after=None, project=None):
-    """有效的回执：交付文件仍在且 hash 没变。project 给定 → 该项目的（不限时间）；否则 → 本轮输出里出现过、
-    且晚于本轮最后一次产出的。返回 [(status, label)]。"""
+    """Valid receipts: the delivered file still exists and its hash is unchanged. If project is given, that project's (any time); otherwise those that appeared in this turn's output
+    and are later than this turn's last output. Returns [(status, label)]."""
     out = []
     try:
         lines = open(os.path.join(STATE, "deliveries.jsonl"), encoding="utf-8").read().splitlines()
@@ -236,7 +236,7 @@ def _bump(key):
         d = json.load(open(path, encoding="utf-8"))
     except (OSError, ValueError):
         d = {}
-    d = {k: v for k, v in d.items() if k == key}          # 只留当前一轮
+    d = {k: v for k, v in d.items() if k == key}          # keep only the current turn
     d[key] = d.get(key, 0) + 1
     os.makedirs(STATE, exist_ok=True)
     json.dump(d, open(path, "w", encoding="utf-8"))

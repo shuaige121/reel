@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""reel 工具入口（Mac 主控）。用法见 python3 reel.py -h；每个子命令输出一个 JSON。"""
+"""reel tool entry point (Mac controller). See python3 reel.py -h for usage; every subcommand prints one JSON object."""
 import os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

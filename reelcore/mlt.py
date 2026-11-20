@@ -1,10 +1,10 @@
-"""读 Shotcut / MLT 工程，输出与 reel timeline 同一种文字时间线，并检测重复用料。只读，不改工程。
+"""Read a Shotcut / MLT project, print the same text timeline as reel timeline, and detect reused footage. Read-only; the project is never modified.
 
-MLT 结构要点：
-- <profile> 给帧率；主 <tractor> 的 <track producer=playlist_id hide=video|audio> 定义轨道顺序（越靠后越上层）。
-- <playlist> 里依次是 <entry producer in out>（占 out-in+1 帧）与 <blank length>（空白）。
-- entry 指向的 producer/chain 带 resource（素材路径，相对工程目录）；若指向 tractor，则是 Shotcut 的「同轨转场」。
-- 滤镜挂在 entry / producer 上：记录 mlt_service 与 shotcut:filter，便于 AI 知道「这里有推近/遮罩/调色」。
+MLT structure notes:
+- <profile> gives the frame rate; the main <tractor>'s <track producer=playlist_id hide=video|audio> defines the track order (later tracks are on top).
+- A <playlist> holds <entry producer in out> (occupies out-in+1 frames) and <blank length> (a gap) in order.
+- The producer/chain an entry points to carries a resource (media path, relative to the project directory); if it points to a tractor, it is a Shotcut same-track transition.
+- Filters hang on an entry / producer: mlt_service and shotcut:filter are recorded so an AI can tell "there is a zoom / mask / colour grade here".
 """
 import os, re
 import xml.etree.ElementTree as ET
@@ -16,7 +16,7 @@ def _props(el):
 
 
 def _frames(v, fps):
-    """MLT 时间：整数帧，或 HH:MM:SS.mmm / HH:MM:SS:FF 时间码。"""
+    """MLT time: an integer frame count, or an HH:MM:SS.mmm / HH:MM:SS:FF timecode."""
     if v is None or v == "":
         return 0
     v = str(v)
@@ -30,7 +30,7 @@ def _frames(v, fps):
     if m:
         h, mi, s, f = map(int, m.groups())
         return int(round((h * 3600 + mi * 60 + s) * fps)) + f
-    raise ReelError("MLT_INVALID", f"无法解析的时间 {v!r}")
+    raise ReelError("MLT_INVALID", f"unparseable time {v!r}")
 
 
 def _filters(el):
@@ -48,13 +48,13 @@ def _filters(el):
 
 def load(path):
     if not os.path.isfile(path):
-        raise ReelError("ASSET_NOT_FOUND", f"工程文件不存在: {path}")
+        raise ReelError("ASSET_NOT_FOUND", f"project file does not exist: {path}")
     if os.path.getsize(path) == 0:
-        raise ReelError("MLT_INVALID", "工程文件大小为 0（可能是 iCloud 未下载的占位文件）", path=path)
+        raise ReelError("MLT_INVALID", "project file is empty (possibly an iCloud placeholder that is not downloaded)", path=path)
     try:
         root = ET.parse(path).getroot()
     except ET.ParseError as e:
-        raise ReelError("MLT_INVALID", f"不是合法的 MLT XML: {e}", path=path)
+        raise ReelError("MLT_INVALID", f"not valid MLT XML: {e}", path=path)
     prof = root.find("profile")
     fps = float(prof.get("frame_rate_num", 25)) / float(prof.get("frame_rate_den", 1)) if prof is not None else 25.0
     base = os.path.dirname(os.path.abspath(path))
@@ -62,7 +62,7 @@ def load(path):
     tractors = [el for el in root if el.tag == "tractor"]
     main = byid.get(root.get("producer")) or (tractors[-1] if tractors else None)
     if main is None:
-        raise ReelError("MLT_INVALID", "找不到主 tractor")
+        raise ReelError("MLT_INVALID", "main tractor not found")
 
     def resource(pid):
         el = byid.get(pid)
@@ -94,7 +94,7 @@ def load(path):
                 ev = {"id": f"{pl.get('id')}#{len(evs)}", "start_f": t, "end_f": t + n, "producer": pid,
                       "in_f": a, "out_f": b}
                 if target is not None and target.tag == "tractor":
-                    # 同轨转场：tractor 里两个 track 各引用一个片段，转场类型在其 transition 里
+                    # same-track transition: the tractor has two tracks, each referencing a clip; the transition type is in its transition element
                     svc = [(_props(x).get("mlt_service"), _props(x).get("shotcut:transition")) for x in target.findall("transition")]
                     ev.update(kind="transition", transition=[s for s in svc if s[0]],
                               between=[x.get("producer") for x in target.findall("track")])
@@ -142,7 +142,7 @@ def text(tl, fa=0, fb=None, show_audio=True):
 
 
 def duplicates(tl, min_overlap_s=0.3):
-    """同一素材文件在视频轨上被多次使用且源区间重叠 ≥min_overlap_s → 观众会看到同一段画面两次。"""
+    """The same media file is used several times on video tracks with overlapping source ranges of at least min_overlap_s: the viewer would see the same picture twice."""
     fps = tl["fps"]
     uses = {}
     for t in tl["tracks"]:
@@ -152,9 +152,9 @@ def duplicates(tl, min_overlap_s=0.3):
             res = e.get("resource") or ""
             if e["kind"] != "clip" or not res or e.get("service") in ("color", "colour") \
                     or re.fullmatch(r"(0x[0-9a-fA-F]{6,8}|#[0-9a-fA-F]{3,8}|[a-z]+)", os.path.basename(res)) or t["id"] == "background":
-                continue                         # 纯色块/透明占位不是素材
+                continue                         # solid colour / transparent placeholders are not footage
             if os.path.splitext(res)[1].lower() not in (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".mts", ".webm"):
-                continue                         # 图片/SVG 图层反复使用是正常的；只查动态画面
+                continue                         # reusing image/SVG layers is normal; only moving footage is checked
             uses.setdefault(res, []).append((t["id"], e))
     found = []
     for res, lst in uses.items():

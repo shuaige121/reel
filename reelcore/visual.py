@@ -1,9 +1,9 @@
-"""给决策层看的图片：多轨时间线 PNG（+ JSON sidecar）与 scrub 抽帧（干净帧 + 标注帧 + index.json）。
+"""Images for the decision layer: a multi-track timeline PNG (+ JSON sidecar) and scrub frame extraction (clean frames + annotated frames + index.json).
 
-画面来源必须写明：
-  render@…        成片里的真实帧（--render）
-  plan_preview    按编译后的取景窗从素材直接裁出（不含字幕烧录；转场按淡化近似）
-  web_placeholder 网页镜头只在渲染时由浏览器绘制，这里只给文字占位
+The picture source must always be stated:
+  render@…        the real frame from the final video (--render)
+  plan_preview    cropped directly from the media by the compiled framing window (no subtitle burn-in; transitions approximated as a fade)
+  web_placeholder web shots are only drawn by the browser at render time; only a text placeholder is given here
 """
 import io, json, math, os, re, subprocess
 from .errors import ReelError
@@ -22,7 +22,7 @@ def _pil():
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
-        raise ReelError("BACKEND_UNAVAILABLE", "需要 Pillow（python3 -m pip install pillow）")
+        raise ReelError("BACKEND_UNAVAILABLE", "Pillow is required (python3 -m pip install pillow)")
     return Image, ImageDraw, ImageFont
 
 
@@ -41,10 +41,10 @@ class Fonts:
 
     def info(self):
         return {"font": self.path, "font_fallback": self.fallback,
-                "note": None if self.path else "未找到中文字体，用 PIL 默认字体，中文可能显示为方框"}
+                "note": None if self.path else "no CJK font found; using the PIL default font, Chinese may show as boxes"}
 
 
-# ---------------- 取帧 ----------------
+# ---------------- frame extraction ----------------
 
 def _start_time(video):
     p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=start_time",
@@ -56,22 +56,22 @@ def _start_time(video):
 
 
 def grab(video, t):
-    """取时间戳 ≥ t 的第一帧（输入端精确 seek）。返回 (PIL.Image, 实际 pts 秒)。"""
+    """Take the first frame with timestamp >= t (accurate input-side seek). Returns (PIL.Image, actual pts in seconds)."""
     Image, _, _ = _pil()
     p = subprocess.run(["ffmpeg", "-hide_banner", "-copyts", "-ss", f"{max(0.0, t):.6f}", "-i", video,
                         "-frames:v", "1", "-vf", "showinfo", "-f", "image2pipe", "-vcodec", "png", "-"],
                        capture_output=True)
     err = p.stderr.decode("utf-8", "replace")
     if p.returncode != 0 or not p.stdout:
-        raise ReelError("FFMPEG_FAILED", f"取帧失败 t={t:.3f}", path=video, stderr=err[-400:])
+        raise ReelError("FFMPEG_FAILED", f"frame extraction failed t={t:.3f}", path=video, stderr=err[-400:])
     m = re.search(r"n:\s*0\s.*?pts_time:([-0-9.]+)", err)
     return Image.open(io.BytesIO(p.stdout)).convert("RGB"), (float(m.group(1)) if m else None)
 
 
 def grab_frame(video, f, fps, start=None):
-    """成片第 f 帧（0 起）。seek 到 (f-0.25)/fps，取 pts≥该时刻的第一帧；返回实际帧号用于核对。"""
+    """Frame f (0-based) of the final video. Seek to (f-0.25)/fps and take the first frame with pts at or after that; the actual frame number is returned for checking."""
     start = _start_time(video) if start is None else start
-    for back in range(4):          # mpv 出的片末帧带 discard 标记、解不出来：往前退，实际帧号如实报告
+    for back in range(4):          # the last frame from mpv carries a discard flag and cannot be decoded: step back and report the actual frame number honestly
         try:
             img, pts = grab(video, start + (f - back - 0.25) / fps)
             break
@@ -83,7 +83,7 @@ def grab_frame(video, f, fps, start=None):
 
 
 class PlanFrames:
-    """按编译结果从素材合成近似画面（取景窗与渲染同一份 ShotCamera.at）。"""
+    """Compose an approximate picture from the media using the compile result (the framing window comes from the same ShotCamera.at as rendering)."""
 
     def __init__(self, c, size=None):
         self.c = c
@@ -110,7 +110,7 @@ class PlanFrames:
         return im
 
     def shot(self, i, local, fonts):
-        """第 i 个镜头的镜头内第 local 帧 → (图, 来源)。"""
+        """Frame local within shot i gives (image, source)."""
         Image, _, _ = _pil()
         c = self.c
         s = c["plan"]["shots"][i]
@@ -118,7 +118,7 @@ class PlanFrames:
         fps = c["plan"]["output"]["fps"]
         if m["kind"] == "web":
             return self.placeholder([f"[web] {s['id']}", os.path.basename(s["web"]["url"]),
-                                     "网页镜头由浏览器渲染；看真实画面请加 --render"], fonts), "web_placeholder"
+                                     "web shots are rendered by the browser; add --render to see the real picture"], fonts), "web_placeholder"
         r = c["cams"][s["id"]].at(local)
         if m["kind"] == "image":
             src = self._src(m["path"])
@@ -127,12 +127,12 @@ class PlanFrames:
         return src.transform((self.W, self.H), Image.EXTENT, tuple(r), Image.BICUBIC), "plan_preview"
 
     def frame(self, f, fonts):
-        """全片第 f 帧：转场重叠区按淡化近似混合两镜。"""
+        """Frame f of the whole video: in a transition overlap the two shots are blended as an approximate fade."""
         Image, _, _ = _pil()
         c = self.c
         idx = [i for i, st in enumerate(c["starts"]) if st <= f < st + c["frames"][i]]
         if not idx:
-            return self.placeholder([f"f{f} 超出画面范围"], fonts), "out_of_range", []
+            return self.placeholder([f"f{f} is out of range"], fonts), "out_of_range", []
         a, src = self.shot(idx[0], f - c["starts"][idx[0]], fonts)
         if len(idx) > 1:
             b, src_b = self.shot(idx[1], f - c["starts"][idx[1]], fonts)
@@ -143,16 +143,16 @@ class PlanFrames:
         return a, src, idx
 
 
-# ---------------- 波形 / 运镜采样 ----------------
+# ---------------- waveform / camera sampling ----------------
 
 def waveform(path, a_s, b_s, cols, rate=8000):
-    """[a_s, b_s) 的单声道峰值包络，每列一个 0..1 值。"""
+    """[a_s, b_s) mono peak envelope, one 0..1 value per column."""
     import array
     dur = max(0.0, b_s - a_s)
     p = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{a_s:.4f}", "-t", f"{dur:.4f}", "-i", path, "-ac", "1",
                         "-ar", str(rate), "-f", "s16le", "-"], capture_output=True)
     if p.returncode != 0:
-        raise ReelError("FFMPEG_FAILED", "音频解码失败", path=path, stderr=p.stderr.decode()[-300:])
+        raise ReelError("FFMPEG_FAILED", "audio decoding failed", path=path, stderr=p.stderr.decode()[-300:])
     x = array.array("h")
     x.frombytes(p.stdout[: len(p.stdout) // 2 * 2])
     n = len(x)
@@ -166,7 +166,7 @@ def waveform(path, a_s, b_s, cols, rate=8000):
 
 
 def camera_speed(cam, fps):
-    """逐帧：pan = 取景中心速度（取景窗宽/秒），zoom = d ln(1/宽)/dt（1/秒，正=推近）。"""
+    """Per frame: pan = framing-centre speed (window widths per second), zoom = d ln(1/width)/dt (1/s, positive = push in)."""
     pan, zoom = [], []
     prev = cam.at(0)
     for f in range(1, cam.n):
@@ -180,7 +180,7 @@ def camera_speed(cam, fps):
     return pan, zoom
 
 
-# ---------------- 多轨 PNG ----------------
+# ---------------- multi-track PNG ----------------
 
 COL = {"bg": (250, 250, 248), "grid": (220, 220, 215), "text": (30, 30, 30), "dim": (120, 120, 120),
        "shot": (70, 110, 170), "tr": (230, 140, 40), "cue": (60, 150, 100), "sent": (120, 90, 170),
@@ -188,7 +188,7 @@ COL = {"bg": (250, 250, 248), "grid": (220, 220, 215), "text": (30, 30, 30), "di
 
 
 def _fit(d, text, font, width):
-    """截断到能放进 width 像素（标签不压到相邻镜头上）。"""
+    """Truncate to fit within width pixels (labels do not run over adjacent shots)."""
     while text and d.textlength(text, font=font) > width:
         text = text[:-1]
     return text
@@ -218,7 +218,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
             "x_map": {"x0": LM, "px_per_frame": ppf, "formula": "x = x0 + (frame - range_f[0]) * px_per_frame"},
             **fonts.info(), "tracks": []}
 
-    # 刻度
+    # ticks
     span = (fb - fa) / fps
     step = next(s for s in (0.5, 1, 2, 5, 10, 15, 30, 60, 120) if span / s <= 16)
     t = math.ceil(fa / fps / step) * step
@@ -229,14 +229,14 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
         d.text((x + 2, y0 + 2), f"{t:g}s", fill=COL["dim"], font=fonts(13))
         t += step
 
-    # V1 缩略图
+    # V1 thumbnails
     y0, y1 = ys["V1"]
     pf = PlanFrames(c)
     evs = []
     for e in tl["tracks"]["V1"]:
         i = next(k for k, s in enumerate(c["plan"]["shots"]) if s["id"] == e["id"])
         x0, x1 = X(e["start_f"]), X(e["end_f"])
-        lane = i % 2                            # 相邻镜头错开半格，转场重叠时两镜都看得见
+        lane = i % 2                            # adjacent shots are staggered by half a lane so both are visible in a transition overlap
         by0, by1 = y0 + 22 + lane * 6, y1 - 20 + lane * 6 - 6
         d.rectangle([x0, by0, x1, by1], outline=COL["shot"], width=2)
         if render_video:
@@ -263,7 +263,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
                     "thumb_source": src})
     side["tracks"].append({"track": "V1", "y": [y0, y1], "events": evs})
 
-    # C1 字幕
+    # C1 subtitles
     y0, y1 = ys["C1"]
     evs = []
     for k, e in enumerate(tl["tracks"]["C1"]):
@@ -275,7 +275,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
         evs.append({"id": e["id"], "start_f": e["start_f"], "end_f": e["end_f"], "x": [round(x0, 1), round(x1, 1)]})
     side["tracks"].append({"track": "C1", "y": [y0, y1], "events": evs})
 
-    # A1 波形 + 句子
+    # A1 waveform + sentences
     y0, y1 = ys["A1"]
     a1 = tl["tracks"]["A1"][0]
     cols = width - LM - RM
@@ -283,7 +283,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
     wav = waveform(voice, fa / fps, fb / fps, cols)
     mid, amp = y0 + 40, 30
     peak = max(wav) if wav else 0.0
-    norm = peak if peak > 1e-4 else 1.0          # 纵轴按区间峰值归一（小音量也看得清起伏），峰值另标
+    norm = peak if peak > 1e-4 else 1.0          # vertical axis is normalised to the range peak (quiet audio is still readable), the peak is labelled separately
     for k, v in enumerate(wav):
         d.line([(LM + k, mid - v / norm * amp), (LM + k, mid + v / norm * amp)], fill=COL["wave"])
     peak_db = round(20 * math.log10(peak), 1) if peak > 0 else None
@@ -298,7 +298,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
     side["tracks"].append({"track": "A1", "y": [y0, y1], "events": evs, "waveform": "peak, mono, 8kHz decode, normalized to range peak",
                            "peak_dbfs": peak_db})
 
-    # BGM + 转场标记
+    # BGM + transition markers
     y0, y1 = ys["BGM/TR"]
     evs = []
     for e in tl["tracks"]["BGM"]:
@@ -321,7 +321,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
                         "end_f": to["overlap_f"][1], "x": [round(x0, 1), round(x1, 1)]})
     side["tracks"].append({"track": "BGM/TR", "y": [y0, y1], "events": evs})
 
-    # 节拍轨：细线=拍，粗线=强拍；每个切点离最近拍的偏差（≤1 帧绿，否则红）
+    # beat track: thin line = beat, thick line = downbeat; each cut's offset to the nearest beat (green if within 1 frame, otherwise red)
     if beats:
         y0, y1 = ys["BEAT"]
         bt = [x + beat_offset for x in beats.get("beats", [])]
@@ -347,13 +347,13 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
         side["tracks"].append({"track": "BEAT", "y": [y0, y1], "bpm": beats.get("bpm"), "backend": beats.get("backend"),
                                "cuts": cuts, "on_beat": sum(c_["on_beat"] for c_ in cuts), "total_cuts": len(cuts)})
 
-    # 运镜速度曲线
+    # camera speed curve
     y0, y1 = ys["CAM"]
     series = []
     for e in tl["tracks"]["V1"]:
         if e["kind"] == "web":
             x0, x1 = X(e["start_f"]), X(e["end_f"])
-            d.text((x0 + 3, y0 + 40), "web: 跳过", fill=COL["dim"], font=fonts(11))
+            d.text((x0 + 3, y0 + 40), "web: skipped", fill=COL["dim"], font=fonts(11))
             continue
         cam = c["cams"][e["id"]]
         pan, zoom = camera_speed(cam, fps)
@@ -369,7 +369,7 @@ def draw_timeline(c, tl, out_png, fa, fb, width=1600, render_video=None, fonts=N
             if len(pts) > 1:
                 d.line(pts, fill=col, width=2)
         cam_ev.append({"id": e["id"], "max_pan": round(max(pan or [0]), 4), "max_zoom_rate": round(max(zoom or [0]), 4)})
-    d.text((LM + 4, y0 + 4), f"pan 取景窗宽/s（蓝）  zoom d ln(1/宽)/dt 1/s（红，正=推近）  满格={top:.3f}",
+    d.text((LM + 4, y0 + 4), f"pan window-widths/s (blue)  zoom d ln(1/width)/dt 1/s (red, positive = push in)  full scale={top:.3f}",
            fill=COL["dim"], font=fonts(11))
     side["tracks"].append({"track": "CAM", "y": [y0, y1], "events": cam_ev, "full_scale": round(top, 4),
                            "units": {"pan": "viewport widths per second (engine camera only, not source motion)",
@@ -394,16 +394,16 @@ def _overlay(im, c, tl, f, idx, overlays, fonts, header):
         for m, col in ((0.05, (255, 200, 0, 200)), (0.10, (0, 220, 255, 200))):
             d.rectangle([W * m, H * m, W * (1 - m), H * (1 - m)], outline=col, width=2)
         d.rectangle([0, H * 0.82, W, H], outline=(255, 80, 80, 200), width=2)
-        d.text((6, H * 0.82 + 4), "平台 UI 区（底部 18%，估计）", fill=(255, 80, 80, 255), font=fonts(fs))
+        d.text((6, H * 0.82 + 4), "platform UI zone (bottom 18%, estimated)", fill=(255, 80, 80, 255), font=fonts(fs))
     if "caption" in overlays:
         for e in tl["tracks"]["C1"]:
             if e["start_f"] <= f < e["end_f"]:
-                # 与 mpv 烧录参数一致的估计位置：sub-pos=90、margin 60（1920 高）
+                # estimated position matching the mpv burn-in parameters: sub-pos=90, margin 60 (1920 high)
                 cy = H * 0.90 - 60 * H / 1920
                 bw = min(W * 0.9, len(e["text"]) * 42 * H / 1920 * 1.05)
                 d.rectangle([(W - bw) / 2, cy - 42 * H / 1920 * 1.3, (W + bw) / 2, cy], outline=(0, 255, 120, 255),
                             width=2)
-                d.text(((W - bw) / 2, cy - 42 * H / 1920 * 1.3 - fs - 4), f"{e['id']}（估计位置）", fill=(0, 255, 120, 255),
+                d.text(((W - bw) / 2, cy - 42 * H / 1920 * 1.3 - fs - 4), f"{e['id']} (estimated position)", fill=(0, 255, 120, 255),
                        font=fonts(fs))
     if "bbox" in overlays:
         for i in idx:
@@ -429,7 +429,7 @@ def _overlay(im, c, tl, f, idx, overlays, fonts, header):
 
 
 def scrub(c, tl, picks, out_dir, render_video=None, overlays=(), fonts=None):
-    """picks: [(requested_t 秒, 帧号, 原因)] → 干净帧 + 标注帧 + index.json。"""
+    """picks: [(requested_t seconds, frame number, reason)] gives clean frames + annotated frames + index.json."""
     fonts = fonts or Fonts()
     os.makedirs(out_dir, exist_ok=True)
     fps = tl["fps"]
@@ -473,7 +473,7 @@ def picks_for(c, tl, at=None, rng=None, samples=None, cuts=False):
         for t in at:
             f = int(math.floor(t * fps + 1e-9))
             if not 0 <= f < total:
-                raise ReelError("ARG_INVALID", f"--at {t}s 超出 [0, {total / fps:.3f})")
+                raise ReelError("ARG_INVALID", f"--at {t}s is outside [0, {total / fps:.3f})")
             out.append((t, f, "at"))
     if rng:
         fa, fb = TL.parse_range(rng, fps, total)
@@ -494,5 +494,5 @@ def picks_for(c, tl, at=None, rng=None, samples=None, cuts=False):
                 out.append((round((cf + t // 2) / fps, 4), cf + t // 2, f"transition {prev}>{sid} mid"))
                 out.append((round((cf + t) / fps, 4), cf + t, f"transition {prev}>{sid} end"))
     if not out:
-        raise ReelError("ARG_INVALID", "需要 --at / --range / --cuts 之一")
+        raise ReelError("ARG_INVALID", "one of --at / --range / --cuts is required")
     return out

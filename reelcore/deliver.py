@@ -1,8 +1,8 @@
-"""受控交付：重新检查 → 判定成片/待审样片 → 复制到交付目录并校验 → 写 hash 绑定的回执。
+"""Controlled delivery: re-check, decide final or sample-pending-review, copy to the delivery directory and verify, write a hash-bound receipt.
 
-回执只证明「这个文件经过这些检查、按这些凭据被复制到这里，复制后 hash 一致」，不证明用户看过。
-登记表（registry）记下已登记任务的交付目录，供 Bash guard 只守这些目录；交付流水（deliveries.jsonl）
-供完成闸门（Stop hook）核对「声称完成」时有没有有效回执。状态目录：$REEL_STATE_DIR 或 ~/.local/state/reel。
+The receipt only proves "this file passed these checks, was copied here on these grounds, and the hash matched after copying"; it does not prove the user watched it.
+The registry records the delivery directories of registered tasks so the Bash guard protects only those; the delivery log (deliveries.jsonl)
+lets the completion gate (Stop hook) check whether a valid receipt exists when "done" is claimed. State directory: $REEL_STATE_DIR or ~/.local/state/reel.
 """
 import datetime, json, os, re, shutil, tempfile
 from . import check, gate
@@ -10,7 +10,7 @@ from .errors import ReelError
 
 RECEIPT_VERSION = "reel.receipt.v1"
 VERSION_RE = re.compile(r"^v\d+(\.\d+)*$")
-SAMPLE_TAG = "sample-pending-review"   # file-name tag of a sample delivery (待审样片)
+SAMPLE_TAG = "sample-pending-review"   # file-name tag of a sample delivery (sample pending review)
 
 
 def state_dir():
@@ -35,7 +35,7 @@ def _write_json(path, obj):
     os.replace(tmp, path)
 
 
-# ---------------- 登记表 ----------------
+# ---------------- registry ----------------
 
 def _registry_path():
     return os.path.join(state_dir(), "registry.json")
@@ -55,7 +55,7 @@ def register(brief_path, remove=False):
     tasks = [t for t in load_registry() if t.get("brief") != brief_path]
     if not remove:
         if fatal:
-            raise ReelError("BRIEF_INVALID", "brief 不能登记", errors=fatal)
+            raise ReelError("BRIEF_INVALID", "the brief cannot be registered", errors=fatal)
         tasks.append({"brief": brief_path, "project_dir": os.path.dirname(brief_path), "name": b["name"],
                       "delivery_root": os.path.realpath(os.path.expanduser(b["delivery_root"])),
                       "delivery_root_as_written": os.path.abspath(os.path.expanduser(b["delivery_root"])),
@@ -64,31 +64,34 @@ def register(brief_path, remove=False):
     return {"registered": not remove, "brief": brief_path, "brief_warnings": final_errs, "tasks": len(tasks)}
 
 
-# ---------------- 交付 ----------------
+# ---------------- delivery ----------------
 
 def _copy(src, dst):
     shutil.copyfile(src, dst)
 
 
 def _copy_verified(src, target, want_sha):
-    """复制到同目录临时文件 → 校验 hash → 不覆盖地落位。不一致则删临时文件并报错。"""
+    """Copy to a temp file in the same directory, verify the hash, then put it in place without overwriting. On mismatch the temp file is removed and an error is raised."""
     d = os.path.dirname(target)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".reel-partial-", suffix=os.path.splitext(target)[1])
     os.close(fd)
     try:
+        # mkstemp creates the file owner-only (0600); a delivered file gets the normal mode, 0666 minus the umask
+        um = os.umask(0); os.umask(um)
+        os.chmod(tmp, 0o666 & ~um)
         _copy(src, tmp)
         with open(tmp, "rb") as fh:
             os.fsync(fh.fileno())
         got = check.sha256(tmp)
         if got != want_sha:
-            raise ReelError("COPY_MISMATCH", "复制后 hash 不一致，未交付", expect=want_sha, got=got)
+            raise ReelError("COPY_MISMATCH", "hash mismatch after copying; not delivered", expect=want_sha, got=got)
         try:
-            os.link(tmp, target)             # 目标已存在则失败，不会覆盖
+            os.link(tmp, target)             # fails if the target exists, so nothing is overwritten
         except FileExistsError:
-            raise ReelError("VERSION_EXISTS", "交付目录里已有同名文件，拒绝覆盖", target=target)
+            raise ReelError("VERSION_EXISTS", "a file with the same name already exists in the delivery directory; refusing to overwrite", target=target)
         except OSError:
             if os.path.exists(target):
-                raise ReelError("VERSION_EXISTS", "交付目录里已有同名文件，拒绝覆盖", target=target)
+                raise ReelError("VERSION_EXISTS", "a file with the same name already exists in the delivery directory; refusing to overwrite", target=target)
             os.rename(tmp, target)
             tmp = None
     finally:
@@ -96,7 +99,7 @@ def _copy_verified(src, target, want_sha):
             os.unlink(tmp)
     got = check.sha256(target)
     if got != want_sha:
-        raise ReelError("COPY_MISMATCH", "落位后 hash 不一致", target=target, expect=want_sha, got=got)
+        raise ReelError("COPY_MISMATCH", "hash mismatch after placement", target=target, expect=want_sha, got=got)
     return got
 
 
@@ -105,15 +108,15 @@ def deliver(video, brief_path, version, c=None, plan_path=None, profile_ref=None
     brief_path = os.path.abspath(brief_path)
     b, final_errs, fatal = gate.load_brief(brief_path)
     if fatal:
-        raise ReelError("BRIEF_INVALID", "brief 缺交付必需字段，不能交付", errors=fatal, brief=brief_path)
+        raise ReelError("BRIEF_INVALID", "the brief lacks fields required for delivery; cannot deliver", errors=fatal, brief=brief_path)
     if not VERSION_RE.match(version or ""):
-        raise ReelError("ARG_INVALID", "版本号格式 v1 / v2 / v3.1", version=version)
+        raise ReelError("ARG_INVALID", "version format is v1 / v2 / v3.1", version=version)
     proj = os.path.dirname(brief_path)
     root = os.path.realpath(os.path.expanduser(b["delivery_root"]))
     stem = f"{b['name']}-{version}" + (f"-{SAMPLE_TAG}" if sample else "")
     target = os.path.join(root, stem + os.path.splitext(video)[1].lower())
     rec_path = os.path.join(proj, ".reel", "receipts", f"{b['name']}-{version}.json")
-    promote = None   # 同一版本的待审样片被用户认可后升成片：只认同一个文件（hash 一致），成片条件一条不少
+    promote = None   # a sample of the same version that the user approved is promoted to final: only the same file (same hash) counts, and every final condition still applies
     if not sample and os.path.exists(rec_path) and not os.path.exists(target):
         try:
             with open(rec_path, encoding="utf-8") as fh:
@@ -124,37 +127,37 @@ def deliver(video, brief_path, version, c=None, plan_path=None, profile_ref=None
             promote = {**prev, "receipt": rec_path}
             rec_path = os.path.join(proj, ".reel", "receipts", f"{b['name']}-{version}-final.json")
     if os.path.exists(target) or os.path.exists(rec_path):
-        raise ReelError("VERSION_EXISTS", "这个版本号已经交付过，换一个版本号（旧版不删不覆盖）",
+        raise ReelError("VERSION_EXISTS", "this version number was already delivered; use another one (old versions are neither deleted nor overwritten)",
                         target=target, receipt=rec_path if os.path.exists(rec_path) else None)
-    # 总是对这个文件重新检查：不接受外部报告，旧报告无法冒充
+    # always re-check this file: external reports are not accepted, so an old report cannot stand in
     rep, prof = gate.check_video(video, c, profile_ref, brief_path, subs, texts, reviews, contract)
     g = rep["gate"]
     rep_path = os.path.join(proj, ".reel", "reports",
                             f"{rep['video_sha256'][:12]}-{_now().replace(':', '')}.json")
     _write_json(rep_path, rep)
     if promote and promote.get("video_sha256") != rep["video_sha256"]:
-        raise ReelError("PROMOTE_MISMATCH", "要升成片的文件不是这个版本交过的待审样片（文件改过）；换新版本号重新交样片给用户看",
+        raise ReelError("PROMOTE_MISMATCH", "the file to promote is not the sample delivered for this version (the file changed); use a new version number and deliver a new sample for the user to review",
                         sample_receipt=promote["receipt"], sample_sha256=promote.get("video_sha256"),
                         this_sha256=rep["video_sha256"])
     if g["status"] == "fail":
-        raise ReelError("DELIVERY_BLOCKED", "技术检查不通过：成片和待审样片都不能交付",
+        raise ReelError("DELIVERY_BLOCKED", "technical checks failed: neither a final nor a sample can be delivered",
                         blockers=g["blockers"], report=rep_path)
     final_blockers = list(final_errs)
     if b.get("deliverable") != "final":
-        final_blockers.append("brief.deliverable 不是 final")
+        final_blockers.append("brief.deliverable is not final")
     if g["pending_review"]:
-        final_blockers.append(f"未处理的 REVIEW：{g['pending_review']}")
+        final_blockers.append(f"unresolved REVIEW: {g['pending_review']}")
     for k, why in g["final_rejected"].items():
         if why:
-            final_blockers.append(f"{k} 判定不通过：{why}")
+            final_blockers.append(f"{k} did not pass: {why}")
     if not g["final_reviews"]["final_watch"]:
-        final_blockers.append("没有本片的完整看片记录（reviews 里 check=final_watch，带时间码观察）")
+        final_blockers.append("no full-watch record for this video (reviews needs check=final_watch with timecoded observations)")
     if prof["audio"] != "silent" and not g["final_reviews"]["final_listen"]:
-        final_blockers.append("没有本片的试听记录（reviews 里 check=final_listen：人听完记原话 quote，或 agent 带时间码听片观察）")
+        final_blockers.append("no listening record for this video (reviews needs check=final_listen: a quote of the person's own words after listening, or timecoded listening observations by the agent)")
     if g["invalid_reviews"]:
-        final_blockers.append(f"有 {len(g['invalid_reviews'])} 条审片记录不合格（空记录/缺字段）")
+        final_blockers.append(f"{len(g['invalid_reviews'])} review records are invalid (empty or missing fields)")
     if not sample and final_blockers:
-        raise ReelError("DELIVERY_NOT_FINAL", "不满足成片条件；可以加 --sample 登记为待审样片",
+        raise ReelError("DELIVERY_NOT_FINAL", "final conditions are not met; add --sample to register it as a sample pending review",
                         final_blockers=final_blockers, report=rep_path)
     delivered_sha = _copy_verified(video, target, rep["video_sha256"])
     fr = g["final_reviews"]
@@ -190,17 +193,17 @@ def deliver(video, brief_path, version, c=None, plan_path=None, profile_ref=None
 
 
 def verify_receipt(path):
-    """回执仍然有效：交付文件还在、hash 没变。"""
+    """The receipt is still valid: the delivered file exists and its hash is unchanged."""
     try:
         with open(path, encoding="utf-8") as fh:
             r = json.load(fh)
     except (OSError, ValueError) as e:
-        return {"ok": False, "why": f"读不了回执：{e}"}
+        return {"ok": False, "why": f"cannot read the receipt: {e}"}
     if r.get("version") != RECEIPT_VERSION:
-        return {"ok": False, "why": "不是 reel 回执"}
+        return {"ok": False, "why": "not a reel receipt"}
     d = r.get("delivered")
     if not d or not os.path.isfile(d):
-        return {"ok": False, "why": "交付文件不在了", "delivered": d}
+        return {"ok": False, "why": "the delivered file is gone", "delivered": d}
     if check.sha256(d) != r.get("delivered_sha256"):
-        return {"ok": False, "why": "交付文件在回执之后被改过", "delivered": d}
+        return {"ok": False, "why": "the delivered file was changed after the receipt", "delivered": d}
     return {"ok": True, "status": r["status"], "delivered": d, "name": r.get("name"), "label": r.get("label")}

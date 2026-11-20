@@ -1,4 +1,4 @@
-"""字幕事件：解析 VTT/SRT → 短句切分 → 写 SRT（mpv 烧录）或 ASS（libass 烧录）。两个 backend 共用一套时间数学。"""
+"""Subtitle events: parse VTT/SRT, split into short lines, write SRT (burned in by mpv) or ASS (burned in by libass). Both backends share one timing calculation."""
 import re
 from .errors import ReelError
 
@@ -13,8 +13,8 @@ def _secs(h, m, s, frac):
 
 
 def parse(path, allow_zero=False):
-    """按块解析 VTT/SRT → [(start, end, text)]。
-    文件头、NOTE/STYLE/REGION 块跳过；其余块必须有可解析的时间行，否则报错（不静默丢字幕）。"""
+    """Parse VTT/SRT block by block → [(start, end, text)]。
+    The file header and NOTE/STYLE/REGION blocks are skipped; every other block must have a parseable time line, otherwise it is an error (subtitles are never dropped silently)."""
     with open(path, encoding="utf-8-sig") as fh:
         blocks = [b for b in re.split(r"\r?\n\s*\r?\n", fh.read().strip()) if b.strip()]
     events, bad = [], []
@@ -28,29 +28,29 @@ def parse(path, allow_zero=False):
         tis = [k for k, ln in enumerate(lines) if "-->" in ln]
         if not tis or tis[0] > 1:
             bad.append(head[:60]); continue
-        if len(tis) > 1:                  # 两条 cue 之间缺空行：不能把编号和时间拼进正文
-            bad.append(f"缺空行: {lines[tis[1]][:50]}"); continue
+        if len(tis) > 1:                  # blank line missing between two cues: the index and time must not end up in the text
+            bad.append(f"missing blank line: {lines[tis[1]][:50]}"); continue
         ti = tis[0]
         m = _CUE.search(lines[ti])
         if not m:
             bad.append(lines[ti][:60]); continue
         g = m.groups()
         a, b = _secs(*g[:4]), _secs(*g[4:])
-        if b < a or (b == a and not allow_zero):     # 逐字时间允许零时长（whisper 常见），字幕不允许
-            bad.append(f"时间倒置: {lines[ti][:50]}"); continue
+        if b < a or (b == a and not allow_zero):     # word timings may have zero duration (common with whisper); subtitles may not
+            bad.append(f"time reversed: {lines[ti][:50]}"); continue
         text = " ".join(_TAG.sub("", ln).strip() for ln in lines[ti + 1:] if ln.strip())
         if text:
             events.append((a, b, text))
     if bad:
-        raise ReelError("SUBTITLES_INVALID", f"{len(bad)} 个字幕块无法解析（不能静默丢掉）", path=path, blocks=bad[:5])
+        raise ReelError("SUBTITLES_INVALID", f"{len(bad)} subtitle blocks could not be parsed (they must not be dropped silently)", path=path, blocks=bad[:5])
     if not events:
-        raise ReelError("SUBTITLES_EMPTY", "字幕文件里没有解析出任何字幕", path=path)
+        raise ReelError("SUBTITLES_EMPTY", "no subtitles were parsed from the subtitle file", path=path)
     return events
 
 
 def chunk_text(t, maxlen=14):
-    """按标点切成 ≤maxlen 字的短条（小红书风格）。以拉丁字母为主的句子（英文等）按 42 字符、只在空格处断，
-    不把单词劈开（14 字硬切会出现「Did Claude Cod」「e just…」）。"""
+    """Split at punctuation into short lines of at most maxlen characters. Sentences that are mostly Latin letters (English etc.) use 42 characters and break only at spaces,
+    so words are never split (a hard 14-character cut would give "Did Claude Cod" / "e just...")."""
     letters = [ch for ch in t if ch.isalpha()]
     latin = bool(letters) and sum(ch.isascii() for ch in letters) > len(letters) * 0.6
     if latin:
@@ -76,7 +76,7 @@ def chunk_text(t, maxlen=14):
 
 
 def cues(events):
-    """事件 → 短条 cue，按字数比例分配时长；不越过原事件结束时间，不累积推迟。"""
+    """Event to short cues; duration is shared in proportion to character count; never goes past the original event end and never accumulates delay."""
     out = []
     for st, en, t in events:
         chunks = chunk_text(t)
@@ -92,7 +92,7 @@ def cues(events):
 
 
 def _fmt(t, unit):
-    """unit=1000 → SRT 毫秒；unit=100 → ASS 厘秒。先取整成整数单位再拆，避免 ,1000 这类进位错误。"""
+    """unit=1000 gives SRT milliseconds; unit=100 gives ASS centiseconds. Round to whole units first, then split, to avoid carry errors like ",1000"."""
     n = int(round(t * unit))
     s, r = divmod(n, unit)
     h, s = divmod(s, 3600)

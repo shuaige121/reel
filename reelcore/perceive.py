@@ -1,9 +1,9 @@
-"""感知层：产出 Observation（带来源、时间、置信度的原图归一化 bbox），决策层只能引用它，不能凭空写坐标。
+"""Perception layer: produces Observations (source-image normalised bboxes with origin, time and confidence); the decision layer may only reference them and must not invent coordinates.
 
-两条来源：
-  1. llm-visual：frame_grid() 抽帧并叠加 0–1 坐标网格，LLM 看图后用 observe() 登记 bbox。
-  2. detector：OWLv2 开放词汇检测（transformers 原生支持），在有 torch 的机器上跑；本机没有 torch 时走 REEL_REMOTE 远程 GPU 主机。
-observations 存在 plan 旁边的 observations.json：[{id, asset, t, label, bbox, conf, source}]
+Two sources:
+  1. llm-visual：frame_grid() extracts a frame and overlays a 0-1 coordinate grid; after looking at the picture the LLM registers a bbox with observe().
+  2. detector：OWLv2 open-vocabulary detection (natively supported by transformers), run on a machine with torch; without local torch it goes to the REEL_REMOTE GPU host.
+observations are stored in observations.json next to the plan:[{id, asset, t, label, bbox, conf, source}]
 """
 import json, os, subprocess, tempfile
 from . import manifest
@@ -12,7 +12,7 @@ from .errors import ReelError
 OWL_MODEL = "google/owlv2-base-patch16-ensemble"
 
 
-# ---------------- observation 存储 ----------------
+# ---------------- observation storage ----------------
 
 def load_obs(path):
     if not path or not os.path.isfile(path):
@@ -43,7 +43,7 @@ def add_obs(path, items):
 
 def _check_bbox(b):
     if not (isinstance(b, (list, tuple)) and len(b) == 4 and 0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1):
-        raise ReelError("BBOX_INVALID", "bbox 必须是归一化 [x0,y0,x1,y1]，0≤x0<x1≤1", bbox=b)
+        raise ReelError("BBOX_INVALID", "bbox must be normalised [x0,y0,x1,y1] with 0<=x0<x1<=1", bbox=b)
     return [round(float(x), 5) for x in b]
 
 
@@ -53,22 +53,22 @@ def observe(obs_path, asset_rel, asset_path, bbox, label, t=0.0, conf=None, sour
                                "conf": conf, "source": source}])[0]
 
 
-# ---------------- 抽帧 + 坐标网格 ----------------
+# ---------------- frame extraction + coordinate grid ----------------
 
 def extract_frame(asset_path, t, out_png):
     meta = manifest.probe(asset_path)
     if meta["kind"] == "video" and meta["duration"] and t > meta["duration"]:
-        raise ReelError("INVALID_TIME", f"t={t} 超出视频长度 {meta['duration']}")
+        raise ReelError("INVALID_TIME", f"t={t} is beyond the video length {meta['duration']}")
     cmd = ["ffmpeg", "-y", "-v", "error"] + (["-ss", f"{t}"] if meta["kind"] == "video" else []) + \
           ["-i", asset_path, "-frames:v", "1", out_png]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
-        raise ReelError("FFMPEG_FAILED", "抽帧失败", stderr=p.stderr[-500:])
+        raise ReelError("FFMPEG_FAILED", "frame extraction failed", stderr=p.stderr[-500:])
     return meta
 
 
 def frame_grid(asset_path, t, out_png, max_side=1400):
-    """抽帧并画 0.1 步长的归一化网格和刻度，供 LLM 读坐标。返回图的尺寸与原图尺寸。"""
+    """Extract a frame and draw a normalised grid with 0.1 steps and tick marks so the LLM can read coordinates. Returns the image size and the source size."""
     from PIL import Image, ImageDraw, ImageFont
     with tempfile.TemporaryDirectory() as td:
         raw = os.path.join(td, "f.png")
@@ -96,11 +96,11 @@ def frame_grid(asset_path, t, out_png, max_side=1400):
         d.text((2, y - 8), f"{i / 10:.1f}", fill=(255, 255, 255), font=font)
     canvas.save(out_png)
     return {"png": out_png, "source_size": [meta["width"], meta["height"]], "t": t,
-            "note": "坐标按图上刻度读取，归一化到原图（0–1，左上为原点）"}
+            "note": "read coordinates from the ticks on the picture, normalised to the source image (0-1, origin at top-left)"}
 
 
 def draw_boxes(asset_path, t, boxes, out_png, max_side=1400):
-    """把 observation 画回帧上，供 LLM 核对检测/登记是否框对。"""
+    """Draw the observation back onto the frame so the LLM can check whether the detection/registration boxed the right thing."""
     from PIL import Image, ImageDraw
     with tempfile.TemporaryDirectory() as td:
         raw = os.path.join(td, "f.png")
@@ -119,16 +119,16 @@ def draw_boxes(asset_path, t, boxes, out_png, max_side=1400):
     return out_png
 
 
-# ---------------- OWLv2 检测（需要 torch；本机没有时走远程主机） ----------------
+# ---------------- OWLv2 detection (needs torch; goes to the remote host when it is missing locally) ----------------
 
 def detect_owlv2(image_paths, queries, threshold=0.15, top_k=3, max_vram_frac=0.8):
-    """image_paths: [(key, png)]。返回 {key: [{label, bbox, conf}]}，bbox 为原图归一化坐标。"""
+    """image_paths: [(key, png)]。Returns {key: [{label, bbox, conf}]}, with bbox in source-image normalised coordinates."""
     try:
         import torch
         from PIL import Image
         from transformers import Owlv2ForObjectDetection, Owlv2Processor
     except ImportError as e:
-        raise ReelError("BACKEND_UNAVAILABLE", "本机没有 torch/transformers：装 ./install.sh --vision，或设 REEL_REMOTE 后用 --where remote", missing=str(e))
+        raise ReelError("BACKEND_UNAVAILABLE", "no local torch/transformers: install with ./install.sh --vision, or set REEL_REMOTE and use --where remote", missing=str(e))
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     if dev == "cuda":
         torch.cuda.set_per_process_memory_fraction(max_vram_frac)
@@ -140,7 +140,7 @@ def detect_owlv2(image_paths, queries, threshold=0.15, top_k=3, max_vram_frac=0.
         inputs = proc(text=[queries], images=im, return_tensors="pt").to(dev)
         with torch.no_grad():
             res = model(**inputs)
-        # OWLv2 预处理把图 pad 成正方形；target_sizes 传 pad 后边长，再按原图宽高归一化
+        # OWLv2 preprocessing pads the image to a square; pass the padded side as target_sizes, then normalise by the source width and height
         side = max(im.size)
         pp = getattr(proc, "post_process_grounded_object_detection", None) or proc.post_process_object_detection
         det = pp(res, threshold=threshold, target_sizes=torch.tensor([[side, side]], device=dev))[0]

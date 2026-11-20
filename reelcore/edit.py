@@ -1,13 +1,13 @@
-"""小粒度编辑 + revision 历史。
+"""Fine-grained edits plus revision history.
 
-流程：读当前 revision →（--base 冲突检测）→ 在内存副本上应用操作 → validate + compile_plan
-→ 成功才把旧版快照存进 PLAN 同目录 .reel-history/<rev>.json、原子写回 plan.json、追加 log；
-任何一步失败都不落盘，返回结构化错误（committed=false）。
+Flow: read the current revision, (--base conflict check), apply the operation on an in-memory copy, validate + compile_plan,
+and only on success save the old snapshot to .reel-history/<rev>.json next to the plan, atomically write plan.json back and append to the log;
+any failing step writes nothing and returns a structured error (committed=false).
 
-revision：第一次编辑时把原文件登记为 r0；之后每次提交 r1, r2 …，每个 revision 都有一份完整快照。
-plan.json 被 reel edit 以外的方式改过（与最后一个 revision 的 hash 不同）→ 当前 revision 记作 "rN*"；
-下一次编辑先把这份外部修改登记成一个 external_edit revision，历史不丢。
-undo 不回退指针，而是提交一个内容等于目标 revision 的新 revision（历史只增不删）。
+Revisions: the first edit registers the original file as r0; each later commit is r1, r2, ..., and every revision has a full snapshot.
+If plan.json was changed by anything other than reel edit (its hash differs from the last revision), the current revision is labelled "rN*";
+the next edit first registers that outside change as an external_edit revision so no history is lost.
+undo does not move a pointer back; it commits a new revision whose content equals the target revision (history only grows).
 """
 import copy, datetime, fcntl, hashlib, json, os, tempfile
 from . import perceive, plan as planmod, render, timeline
@@ -36,13 +36,13 @@ def read_log(plan_path):
     with open(p, encoding="utf-8") as fh:
         log = json.load(fh)
     if log.get("plan") != os.path.basename(plan_path):
-        raise ReelError("HISTORY_MISMATCH", f"{HIST} 属于 {log.get('plan')}，不是 {os.path.basename(plan_path)}；"
-                        "同一目录只支持一个 plan 的历史", history=hist_dir(plan_path))
+        raise ReelError("HISTORY_MISMATCH", f"{HIST} belongs to {log.get('plan')}and not to {os.path.basename(plan_path)}; "
+                        "one directory supports the history of only one plan", history=hist_dir(plan_path))
     return log
 
 
 def state(plan_path, raw=None):
-    """当前 revision 标签：无历史 → r0；与最后 revision 一致 → rN；被外部改过 → rN*。"""
+    """Current revision label: no history gives r0; matches the last revision gives rN; changed externally gives rN*."""
     raw = planmod.load(plan_path) if raw is None else raw
     log = read_log(plan_path)
     if not log:
@@ -54,7 +54,7 @@ def state(plan_path, raw=None):
 
 
 def resolved(raw, plan_path):
-    """与 cli._plan_and_obs 相同的 src_dir 解析，作用在副本上（原始 plan 保持原样写回）。"""
+    """The same src_dir resolution as cli._plan_and_obs, applied to the copy (the original plan is written back unchanged)."""
     p = copy.deepcopy(raw)
     base = os.path.dirname(os.path.abspath(plan_path))
     if not os.path.isabs(p.get("src_dir") or ""):
@@ -67,14 +67,14 @@ def default_obs(plan_path, obs_path=None):
                                                       "observations.json"))
 
 
-# ---------------- 操作 ----------------
+# ---------------- operations ----------------
 
 def _idx(plan, sid):
     shots = plan.get("shots") or []
     for i, s in enumerate(shots):
         if isinstance(s, dict) and s.get("id") == sid:
             return i
-    raise ReelError("SHOT_NOT_FOUND", f"没有镜头 {sid!r}", ids=[s.get("id") for s in shots if isinstance(s, dict)])
+    raise ReelError("SHOT_NOT_FOUND", f"no shot {sid!r}", ids=[s.get("id") for s in shots if isinstance(s, dict)])
 
 
 def _num(v):
@@ -84,7 +84,7 @@ def _num(v):
 def _pos(plan, op, default_end=True):
     if "index" in op:
         if not (isinstance(op["index"], int) and 0 <= op["index"] <= len(plan["shots"])):
-            raise ReelError("OP_INVALID", f"index 超出范围 0..{len(plan['shots'])}", op=op)
+            raise ReelError("OP_INVALID", f"index out of range 0..{len(plan['shots'])}", op=op)
         return op["index"]
     if "after" in op:
         return _idx(plan, op["after"]) + 1
@@ -92,18 +92,18 @@ def _pos(plan, op, default_end=True):
         return _idx(plan, op["before"])
     if default_end:
         return len(plan["shots"])
-    raise ReelError("OP_INVALID", "需要 index / before / after 之一", op=op)
+    raise ReelError("OP_INVALID", "needs one of index / before / after", op=op)
 
 
 def apply_op(plan, op):
-    """在 plan（原始 JSON，未规范化）上原地应用一个操作，返回直接改动的镜头 id。"""
+    """Apply one operation in place on the plan (raw JSON, not normalised) and return the ids of the shots changed directly."""
     if not isinstance(op, dict) or op.get("op") not in OPS:
-        raise ReelError("OP_INVALID", f"op 必须是 {OPS}", op=op)
+        raise ReelError("OP_INVALID", f"op must be one of {OPS}", op=op)
     kind = op["op"]
     if kind == "insert":
         shot = op.get("shot")
         if not isinstance(shot, dict) or not isinstance(shot.get("id"), str):
-            raise ReelError("OP_INVALID", "insert 需要 shot 对象且带 id", op=op)
+            raise ReelError("OP_INVALID", "insert needs a shot object with an id", op=op)
         at = _pos(plan, op)
         plan["shots"].insert(at, copy.deepcopy(shot))
         return [shot["id"]]
@@ -111,11 +111,11 @@ def apply_op(plan, op):
     s = plan["shots"][i]
     if kind == "trim":
         if "duration" not in op and "source_in" not in op:
-            raise ReelError("OP_INVALID", "trim 需要 duration 和/或 source_in", op=op)
+            raise ReelError("OP_INVALID", "trim needs duration and/or source_in", op=op)
         for k in ("duration", "source_in"):
             if k in op:
                 if not _num(op[k]):
-                    raise ReelError("OP_INVALID", f"trim.{k} 必须是数字", op=op)
+                    raise ReelError("OP_INVALID", f"trim.{k} must be a number", op=op)
                 s[k] = op[k]
         return [s["id"]]
     if kind == "move":
@@ -133,10 +133,10 @@ def apply_op(plan, op):
         return [s["id"]]
     if kind == "replace":
         if not isinstance(op.get("asset"), str) or not op["asset"]:
-            raise ReelError("OP_INVALID", "replace 需要 asset", op=op)
+            raise ReelError("OP_INVALID", "replace needs asset", op=op)
         if s.get("kind") == "web":
             if "camera" not in op:
-                raise ReelError("OP_INVALID", "网页镜头换成素材时运镜不通用，需同时给 camera", op=op)
+                raise ReelError("OP_INVALID", "camera moves do not carry over when a web shot becomes a media shot; give camera as well", op=op)
             for k in ("kind", "web", "highlight"):
                 s.pop(k, None)
         s["asset"] = op["asset"]
@@ -154,7 +154,7 @@ def apply_op(plan, op):
         return [s["id"]]
     if kind == "set-camera":
         if "camera" not in op:
-            raise ReelError("OP_INVALID", "set-camera 需要 camera（数组；[] = 静止）", op=op)
+            raise ReelError("OP_INVALID", "set-camera needs camera (an array; [] = static)", op=op)
         s["camera"] = op["camera"]
         for k in ("viewport", "space"):
             if k in op:
@@ -163,7 +163,7 @@ def apply_op(plan, op):
     raise AssertionError(kind)
 
 
-# ---------------- 差异 ----------------
+# ---------------- diff ----------------
 
 def _shot_sigs(c):
     out = {}
@@ -186,7 +186,7 @@ def _merge(iv):
 
 
 def affected(old_c, new_c):
-    """受影响的帧区间（新时间线坐标 + 被删镜头在旧时间线的区间）和只平移的镜头。"""
+    """Affected frame ranges (in new-timeline coordinates plus the ranges of removed shots in the old timeline) and the shots that only shifted."""
     new = _shot_sigs(new_c)
     if old_c is None:
         return [[0, new_c["visual_f"]]], [], list(new)
@@ -211,7 +211,7 @@ def affected(old_c, new_c):
     return _merge(iv), sorted(shifted, key=key), sorted(content, key=key)
 
 
-# ---------------- 提交 ----------------
+# ---------------- commit ----------------
 
 def _atomic_json(path, obj):
     d = os.path.dirname(os.path.abspath(path))
@@ -233,14 +233,14 @@ def _compile(raw, plan_path, obs):
 
 
 def _commit(plan_path, before_sha, new_raw, op):
-    """持锁提交：确认读取后文件没被别人改过 → 快照 → 原子写 plan → 追加 log。"""
+    """Commit under a lock: confirm nobody changed the file since it was read, then snapshot, atomically write the plan and append to the log."""
     hd = hist_dir(plan_path)
     os.makedirs(hd, exist_ok=True)
     with open(os.path.join(hd, "lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         cur = planmod.load(plan_path)
         if _sha(cur) != before_sha:
-            raise ReelError("REV_CONFLICT", "编辑期间 plan.json 被别的进程改过，未写入；重新读取后再编辑",
+            raise ReelError("REV_CONFLICT", "plan.json was changed by another process during the edit; nothing was written; re-read and edit again",
                             committed=False)
         log = read_log(plan_path) or {"plan": os.path.basename(plan_path), "revisions": []}
         revs = log["revisions"]
@@ -266,17 +266,17 @@ def _run(plan_path, new_fn, op_record, base, dry_run, obs, detail):
     raw = planmod.load(plan_path)
     st = state(plan_path, raw)
     if base is not None and base != st["revision"]:
-        raise ReelError("REV_CONFLICT", f"--base {base} 不是当前 revision {st['revision']}；先 timeline/history 读最新再改",
+        raise ReelError("REV_CONFLICT", f"--base {base} is not the current revision {st['revision']}; read the latest with timeline/history before editing",
                         base=base, current=st["revision"], committed=False)
     new_raw, changed = new_fn(copy.deepcopy(raw))
     try:
         old_c = _compile(raw, plan_path, obs)
     except ReelError:
-        old_c = None                       # 原 plan 本身编译不过：受影响区间按全片报
+        old_c = None                       # the original plan itself does not compile: report the whole video as affected
     try:
         new_c = _compile(new_raw, plan_path, obs)
     except ReelError as e:
-        raise ReelError(e.code, f"编辑被拒绝，未写入：{e.message}", committed=False, op=op_record,
+        raise ReelError(e.code, f"edit rejected, nothing written: {e.message}", committed=False, op=op_record,
                         **{k: v for k, v in e.detail.items() if k not in ("committed", "op")})
     iv, shifted, content = affected(old_c, new_c)
     if changed is None:
@@ -294,7 +294,7 @@ def _run(plan_path, new_fn, op_record, base, dry_run, obs, detail):
 def edit(plan_path, ops, base=None, dry_run=False, obs=None, detail="events"):
     ops = ops if isinstance(ops, list) else [ops]
     if not ops:
-        raise ReelError("OP_INVALID", "没有操作")
+        raise ReelError("OP_INVALID", "no operation")
 
     def fn(p):
         changed = []
@@ -311,7 +311,7 @@ def undo(plan_path, to, base=None, dry_run=False, obs=None):
     log = read_log(plan_path)
     snap = os.path.join(hist_dir(plan_path), f"{to}.json")
     if not log or not any(r["rev"] == to for r in log["revisions"]) or not os.path.isfile(snap):
-        raise ReelError("REV_NOT_FOUND", f"没有 revision {to}", known=[r["rev"] for r in (log or {}).get("revisions", [])])
+        raise ReelError("REV_NOT_FOUND", f"no revision {to}", known=[r["rev"] for r in (log or {}).get("revisions", [])])
     with open(snap, encoding="utf-8") as fh:
         target = json.load(fh)
     return _run(plan_path, lambda p: (target, None), {"op": "undo", "to": to},
