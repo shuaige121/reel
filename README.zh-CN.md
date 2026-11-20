@@ -69,6 +69,7 @@ ffmpeg 的命令行引擎、两个交付 hook 和一个编导 agent。它和 Ins
 只在一次会话里试用、不安装：`claude --plugin-dir /本仓库的绝对路径`。
 
 插件启用时，`reel` 在 Bash 工具的 PATH 上，两个 hook 生效，skill 的命令是 `/reel:reel`（你说要做视频时 Claude 也会自动用它），agent 名是 `reel:director`。
+两个 hook 只在插件启用期间生效；登记 brief（`reel register`）之前它们什么都不做，Stop hook 只对视频工作起作用。
 
 ### 手动安装
 

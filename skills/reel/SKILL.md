@@ -35,8 +35,8 @@ Each step is enforced by code: skip one and you cannot deliver a final cut.
    language, final or sample, delivery folder and what must not change: if you cannot fill these in, ask the user.
    Once registered, the Bash guard hook refuses `cp`/`mv`/`ffmpeg` writes into the delivery folder.
 2. **Audition the voice.** There is no default voice. Pick one that fits the brief, render a 10-20 s sample and run
-   `reel voice check sample.mp3 --script sample.txt --brief brief.json --lang en`. Local whisper transcribes the sample
-   and compares it with the text (Chinese with `--lang zh` is compared by toneless pinyin, so homophone spelling does
+   `reel voice check sample.mp3 --script sample.txt --brief brief.json`. Local whisper transcribes the sample
+   and compares it with the text (`--lang` defaults to `en`; for a Chinese voice-over pass `--lang zh`, which compares by toneless pinyin, so homophone spelling does
    not count as an error); only an error rate of 10% or less writes the approval into `brief.voice.approved`
    (`by: claude`, with the transcript as evidence). If the user listened, record their exact words instead.
    - STT proves the words are read correctly and clearly. It does not prove the voice suits the piece: say in your

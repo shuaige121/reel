@@ -82,6 +82,7 @@ For a single session without installing: `claude --plugin-dir /absolute/path/to/
 
 While the plugin is enabled, `reel` is on the Bash tool's PATH, both hooks are active, the skill runs as `/reel:reel`
 (Claude also picks it up when you ask for a video), and the agent is `reel:director`.
+The hooks are active only while the plugin is enabled; they do nothing until a brief is registered with `reel register`, and the Stop hook acts only on video work.
 
 ### Manual install
 

@@ -90,7 +90,7 @@ Text positions come from the DOM (`Range.getClientRects`, per character), and th
 frame by frame (Playwright): pushing in re-rasterises at the new scale, so text stays sharp. Needs `./install.sh --web`.
 
 ```bash
-reel words voice.mp3 --out words.json --lang en   # voice-over → per-word timing (local whisper.cpp); falls back to even spacing within subtitle cues
+reel words voice.mp3 --out words.json              # voice-over → per-word timing (local whisper.cpp); --lang defaults to en, use --lang zh for Chinese; falls back to even spacing within subtitle cues
 ```
 ```json
 {"id": "w1", "kind": "web", "duration": 28.8,
