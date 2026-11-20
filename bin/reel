@@ -1,0 +1,19 @@
+#!/bin/sh
+# reel command-line entry point. Uses the reel virtualenv created by install.sh when it exists.
+# Python selection: $REEL_PYTHON > $REEL_VENV/bin/python (default ~/.local/share/reel/venv) > python3.
+self="$0"
+while [ -h "$self" ]; do                       # follow symlinks (install.sh --link puts one on PATH)
+  target="$(readlink "$self")"
+  case "$target" in
+    /*) self="$target" ;;
+    *) self="$(dirname "$self")/$target" ;;
+  esac
+done
+root="$(cd "$(dirname "$self")/.." && pwd -P)"
+if [ "${1:-}" = "--root" ]; then echo "$root"; exit 0; fi   # where docs/ENGINE.md, profiles/ and hooks/ live
+py="${REEL_PYTHON:-}"
+if [ -z "$py" ]; then
+  venv="${REEL_VENV:-$HOME/.local/share/reel/venv}"
+  if [ -x "$venv/bin/python" ]; then py="$venv/bin/python"; else py="python3"; fi
+fi
+exec "$py" "$root/reel.py" "$@"

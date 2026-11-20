@@ -1,0 +1,12 @@
+{
+  "name": "reel-tools",
+  "description": "The reel video workflow plugin for Claude Code.",
+  "owner": {"name": "Leonard Chow"},
+  "plugins": [
+    {
+      "name": "reel",
+      "source": "./",
+      "description": "Brief, plan, render, check and deliver short videos from Claude Code."
+    }
+  ]
+}

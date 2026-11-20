@@ -1,0 +1,3 @@
+# Core runtime for the reel engine (install.sh installs these into the reel venv).
+numpy>=1.24
+Pillow>=10.1

@@ -1,0 +1,33 @@
+{
+ "version": "reel.plan.v1",
+ "src_dir": "media",
+ "output": {"width": 1080, "height": 1920, "fps": 30},
+ "duration_policy": "fit_last_shot",
+ "shots": [
+  {"id": "s1", "asset": "card-1.png", "duration": 3.2,
+   "note": "push in on the subject registered as obs-1",
+   "camera": [{"op": "zoom_to", "observation_id": "obs-1", "t0": 0.3, "t1": 2.8, "easing": "ease_in_out",
+               "padding": 0.35, "max_zoom": 2.0}],
+   "transition_out": {"type": "fade", "duration": 0.4}},
+  {"id": "s2", "asset": "card-2.png", "duration": 3.2,
+   "note": "slow pan across the centre-cropped frame",
+   "space": "cover", "viewport": [0.0, 0.06, 0.88, 0.94],
+   "camera": [{"op": "move_to", "viewport": [0.12, 0.06, 1.0, 0.94], "t0": 0.0, "t1": 3.2, "easing": "linear"}],
+   "transition_out": {"type": "fade", "duration": 0.4}},
+  {"id": "s3", "asset": "card-3.png", "duration": 3.2,
+   "note": "push in on the subject registered as obs-2",
+   "camera": [{"op": "zoom_to", "observation_id": "obs-2", "t0": 0.4, "t1": 2.8, "easing": "ease_in_out",
+               "padding": 0.35, "max_zoom": 2.0}],
+   "transition_out": {"type": "fade", "duration": 0.4}},
+  {"id": "s4", "asset": "card-4.png", "duration": 3.2,
+   "note": "an empty camera list holds the frame completely still",
+   "camera": [],
+   "transition_out": {"type": "fade", "duration": 0.4}},
+  {"id": "s5", "asset": "card-5.png", "duration": 3.2,
+   "note": "end card: start moving after the fade, pull back to the full frame at a constant speed",
+   "space": "cover", "viewport": [0.1, 0.1, 0.9, 0.9],
+   "camera": [{"op": "move_to", "viewport": [0.0, 0.0, 1.0, 1.0], "t0": 0.5, "t1": 3.0, "easing": "linear"}]}
+ ],
+ "audio": {"voice": "music.wav"},
+ "look": {"grade": false}
+}

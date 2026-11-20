@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+# outputs reel writes next to a plan or brief
+.reel/
+.reel-history/

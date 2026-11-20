@@ -1,0 +1,8 @@
+{
+  "name": "reel",
+  "version": "0.1.0",
+  "description": "Video production workflow for Claude Code: brief, plan, render with ffmpeg, technical check, and hash-verified delivery with a receipt.",
+  "author": {"name": "Leonard Chow"},
+  "license": "MIT",
+  "keywords": ["video", "ffmpeg", "editing", "reels", "delivery"]
+}

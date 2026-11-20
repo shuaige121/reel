@@ -1,0 +1,10 @@
+{
+ "version": "reel.brief.v1",
+ "name": "reel-example",
+ "language": "en",
+ "deliverable": "final",
+ "delivery_root": "~/reel-example/delivered",
+ "must_not_change": ["end card text"],
+ "voice": {"mode": "none"},
+ "profile": "default"
+}
