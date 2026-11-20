@@ -10,11 +10,18 @@ from reelcore import beats as B  # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="reel_beats_")
 RESULTS = []
+SKIPPED = []
+
+
+class Skip(Exception):
+    """Optional dependency or model missing: reported as SKIPPED, never as passed."""
 
 
 def case(fn):
     try:
         fn(); RESULTS.append((fn.__name__, True, ""))
+    except Skip as e:
+        SKIPPED.append((fn.__name__, str(e)))
     except Exception as e:  # noqa: BLE001
         RESULTS.append((fn.__name__, False, f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"))
     return fn
@@ -66,7 +73,7 @@ def auto_backend_falls_back_on_crowded_beats():
     """稀疏鼓点+反拍踩镲的合成节奏上，beat_this 会把反拍也当拍（拍点过密）。
     auto 必须识别并改用起音校正后的 librosa，结果仍准确；显式 beat_this 必须明确报错而不是给错网格。"""
     if not os.path.exists(os.path.expanduser("~/.cache/torch/hub/checkpoints/beat_this-final0.ckpt")):
-        print("   (skip: beat_this checkpoint not cached)"); return
+        raise Skip("beat_this checkpoint not cached (./install.sh --beats-ml, then run reel beats once)")
     r = B.analyze(WAV, "auto")
     assert r["backend"] == "librosa" and "过密" in r.get("fallback_reason", ""), (r["backend"], r.get("fallback_reason"))
     assert (errs(r["beats"], TRUE_BEATS) < 0.02).all() and (errs(r["downbeats"], TRUE_DOWNS) < 0.02).all()
@@ -170,7 +177,7 @@ def rendered_cuts_land_on_beats():
                                   capture_output=True, text=True).stdout)
     assert r["ok"] and r["result"]["revision"], r
     out = os.path.join(d, "mv.mp4")
-    r = json.loads(subprocess.run(cli + ["render", pj, "--out", out, "--where", "mac"], capture_output=True,
+    r = json.loads(subprocess.run(cli + ["render", pj, "--out", out, "--where", "local"], capture_output=True,
                                   text=True).stdout)
     assert r["ok"], r
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", out, "-vf", "scale=8:8,format=rgb24", "-f", "rawvideo", "-"],
@@ -195,6 +202,8 @@ if __name__ == "__main__":
     fails = [r for r in RESULTS if not r[1]]
     for name, ok, msg in RESULTS:
         print(("✅ " if ok else "❌ ") + name + ("" if ok else "\n   " + msg.replace("\n", "\n   ")))
-    print(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过")
+    for name, why in SKIPPED:
+        print(f"⏭️  {name} — SKIPPED: {why}")
+    print(f"\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过" + (f"，{len(SKIPPED)} 项跳过（缺可选依赖）" if SKIPPED else ""))
     shutil.rmtree(TMP, ignore_errors=True)
     sys.exit(1 if fails else 0)
