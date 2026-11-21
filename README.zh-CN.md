@@ -54,6 +54,7 @@ ffmpeg 的命令行引擎、两个交付 hook 和一个编导 agent。它和 Ins
 克隆本仓库，在仓库目录里运行：
 
 ```bash
+git clone https://github.com/shuaige121/reel.git && cd reel
 ./install.sh            # 建 ~/.local/share/reel/venv，装 numpy 和 Pillow；按上表加参数
 ```
 
@@ -62,9 +63,11 @@ ffmpeg 的命令行引擎、两个交付 hook 和一个编导 agent。它和 Ins
 本仓库本身是一个插件，也是只含这一个插件的 marketplace。在 Claude Code 里：
 
 ```
-/plugin marketplace add /本仓库的绝对路径
+/plugin marketplace add shuaige121/reel
 /plugin install reel@reel-tools
 ```
+
+用本地克隆安装：`/plugin marketplace add /本仓库的绝对路径`。
 
 只在一次会话里试用、不安装：`claude --plugin-dir /本仓库的绝对路径`。
 

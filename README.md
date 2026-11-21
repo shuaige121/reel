@@ -66,6 +66,7 @@ Optional, per feature (all free and local unless noted):
 Clone this repository, then from its folder:
 
 ```bash
+git clone https://github.com/shuaige121/reel.git && cd reel
 ./install.sh            # creates ~/.local/share/reel/venv with numpy and Pillow; add flags from the table above
 ```
 
@@ -74,9 +75,11 @@ Clone this repository, then from its folder:
 The repository is a plugin and a one-plugin marketplace. In Claude Code:
 
 ```
-/plugin marketplace add /absolute/path/to/this/repository
+/plugin marketplace add shuaige121/reel
 /plugin install reel@reel-tools
 ```
+
+From a local clone instead: `/plugin marketplace add /absolute/path/to/this/repository`.
 
 For a single session without installing: `claude --plugin-dir /absolute/path/to/this/repository`.
 
