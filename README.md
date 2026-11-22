@@ -11,6 +11,11 @@ Reels.
 
 Short version: **Made with /reel: brief in, checked video file out.**
 
+## Made with reel
+
+- [Unfair Advantage](https://www.youtube.com/shorts/TY1U2JnFkzE): a 3-minute vertical music video (1080x1920). The song
+  was made with Suno; the edit, checks and delivery were done with reel, over 18 versions.
+
 ## What it is not
 
 A one-click generator. The agent needs a clear brief and your own material. Songs, AI images and AI video clips come

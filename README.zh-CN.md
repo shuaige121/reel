@@ -9,6 +9,10 @@ ffmpeg 的命令行引擎、两个交付 hook 和一个编导 agent。它和 Ins
 
 短版：**Made with /reel：需求进去，检查过的视频文件出来。**
 
+## 用 reel 做的作品
+
+- [Unfair Advantage](https://www.youtube.com/shorts/TY1U2JnFkzE)：3 分钟竖屏 MV（1080x1920）。歌用 Suno 制作；剪辑、检查和交付用 reel 完成，前后出了 18 版。
+
 ## 它不是什么
 
 不是一键生成器。agent 需要清楚的需求和你自己的素材。歌曲、AI 图片、AI 视频片段来自你自己选用的其他服务。和找真人剪辑一样，要提意见、出新版本。
